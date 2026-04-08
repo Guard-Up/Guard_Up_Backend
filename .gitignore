@@ -205,3 +205,22 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===== 안심 계약 가디언 전용 =====
+
+# 환경변수 (이미 .env 있지만 명시)
+.env.local
+.env.*.local
+
+# 세션 매핑 테이블 (개인정보 - 절대 커밋 금지)
+session_maps/
+mapping_tables/
+*.session.json
+
+# Chroma DB 로컬 저장소
+chroma_db/
+vectorstore/
+
+# 업로드된 계약서 이미지 (개인정보)
+uploads/
+temp/
