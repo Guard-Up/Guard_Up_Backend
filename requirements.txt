@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+pydantic
+pydantic-settings
+langchain
+langchain-openai
+chromadb
+python-multipart
