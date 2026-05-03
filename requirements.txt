@@ -8,3 +8,4 @@ langchain
 langchain-openai
 chromadb
 python-multipart
+redis>=5.0.0
