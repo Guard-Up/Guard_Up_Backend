@@ -8,14 +8,14 @@ import glob
 import json
 from functools import lru_cache
 
-from langchain.schema import Document
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
 from app.core.exceptions import AppException
 
 # ── 설정 ────────────────────────────────────────────────────
-KURE_MODEL_NAME = "upskyy/kure-roberta-small"  # KURE-v1
+KURE_MODEL_NAME = "nlpai-lab/KURE-v1"  # KURE-v1
 CHROMA_DB_PATH = "./db_store"
 COLLECTION_NAME = "legal_clauses"
 LEGAL_DOCS_PATH = "./data/legal_docs"
