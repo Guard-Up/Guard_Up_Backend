@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile
 
 from app.core.exceptions import AppException
 from app.core.session import (
@@ -12,7 +12,6 @@ from app.core.session import (
     new_session_id,
 )
 from app.schemas.analyze import (
-    ImageRequest,
     ImageResponse,
     Issue,
     PublicData,
@@ -25,15 +24,17 @@ router = APIRouter()
 
 
 @router.post("/analyze/image", response_model=ImageResponse)
-async def analyze_image(req: ImageRequest):
+async def analyze_image(file: UploadFile = File(...)):
     """
     1단계: 계약서 이미지 분석
-    - CLOVA OCR 텍스트 추출 (본인)
-    - 개인정보 비식별화 (팀원2 - masking_service)
+    - CLOVA OCR 텍스트 추출
+    - 개인정보 비식별화
     - Redis 세션 생성
     """
+    image_bytes = await file.read()
+
     # 1. OCR 실행
-    ocr_result = await ocr_service.run_ocr(req.image)
+    ocr_result = await ocr_service.run_ocr(image_bytes)
     ocr_text = ocr_result["text"]
     raw_address = ocr_result["address"]
 
