@@ -4,10 +4,6 @@ from pydantic import BaseModel
 
 # ── 1단계: /api/analyze/image ──────────────────────────────
 
-class ImageRequest(BaseModel):
-    image: str  # base64 인코딩된 계약서 이미지
-
-
 class ImageResponse(BaseModel):
     session_id: str
     ocr_text: str
@@ -29,8 +25,6 @@ class Issue(BaseModel):
 
 class PublicData(BaseModel):
     jeonse_ratio: str
-    guarantee_available: Optional[bool] = None
-    max_guarantee_amount: Optional[int] = None
     is_registered: bool
     mortgage_amount: Optional[int] = None
 

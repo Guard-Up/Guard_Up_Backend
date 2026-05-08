@@ -6,6 +6,13 @@ pydantic
 pydantic-settings
 langchain
 langchain-openai
+langchain-huggingface
+langchain-community
 chromadb
+sentence-transformers
+transformers
+torch
+Pillow
+pillow-heif
 python-multipart
 redis>=5.0.0
