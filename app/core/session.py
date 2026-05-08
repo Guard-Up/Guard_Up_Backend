@@ -55,3 +55,7 @@ async def update_session(session_id: str, updates: dict) -> None:
 async def delete_session(session_id: str) -> None:
     r = get_redis()
     await r.delete(f"session:{session_id}")
+
+async def purge_mapping(session_id: str) -> None:
+    """분석 완료 후 개인정보 매핑 테이블만 파기"""
+    await update_session(session_id, {KEY_MAPPING: None})
