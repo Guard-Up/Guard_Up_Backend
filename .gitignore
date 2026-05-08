@@ -220,7 +220,10 @@ mapping_tables/
 # Chroma DB 로컬 저장소
 chroma_db/
 vectorstore/
+db_store/
 
 # 업로드된 계약서 이미지 (개인정보)
 uploads/
 temp/
+.idea/
+.python-version

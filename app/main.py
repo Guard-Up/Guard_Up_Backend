@@ -2,8 +2,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import address, analyze, building, health, institution
+from app.api import (address, analyze, building, health, institution)
+# , risk)
 from app.core.exceptions import AppException
+
+from app.services.rag_service import load_legal_documents
 
 app = FastAPI(
     title="안심 계약 가디언 API",
@@ -27,9 +30,14 @@ async def app_exception_handler(request: Request, exc: AppException):
         content={"error_code": exc.error_code, "message": exc.message},
     )
 
+@app.on_event("startup")
+async def startup():
+    load_legal_documents()
+
 
 app.include_router(analyze.router, prefix="/api")
 app.include_router(address.router, prefix="/api")
 app.include_router(building.router, prefix="/api")
 app.include_router(institution.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
+# app.include_router(risk.router, prefix="/api")  # 이 줄 추가
