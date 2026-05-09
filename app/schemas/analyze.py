@@ -1,11 +1,8 @@
-from typing import Optional
-
+from typing import Any, Optional
 from pydantic import BaseModel
 
 
-class ImageRequest(BaseModel):
-    image: str  # base64 인코딩된 계약서 이미지
-
+# ── 1단계: /api/analyze/image ──────────────────────────────
 
 class ImageResponse(BaseModel):
     session_id: str
@@ -13,6 +10,8 @@ class ImageResponse(BaseModel):
     masked_text: str
     address: Optional[str] = None
 
+
+# ── 4단계: /api/analyze/risk ───────────────────────────────
 
 class RiskRequest(BaseModel):
     session_id: str
@@ -31,9 +30,9 @@ class PublicData(BaseModel):
 
 
 class RiskResponse(BaseModel):
-    score: int  # 0~100, 낮을수록 위험
-    level: str  # "safe" / "caution" / "danger"
+    score: int  # 0~100 (낮을수록 위험)
+    level: str  # "safe" | "caution" | "danger"
     issues: list[Issue]
-    action_guide: list[dict]
+    action_guide: list[Any]
     public_data: PublicData
     mapping_table_purged: bool

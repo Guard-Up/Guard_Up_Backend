@@ -1,30 +1,82 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile
 
-from app.core.session import new_session_id
+from app.core.exceptions import AppException
+from app.core.session import (
+    KEY_JEONSE_AMOUNT,
+    KEY_MAPPING,
+    KEY_MASKED_TEXT,
+    KEY_OCR_TEXT,
+    KEY_RAW_ADDRESS,
+    KEY_STEPS_COMPLETED,
+    create_session,
+    new_session_id,
+)
 from app.schemas.analyze import (
-    ImageRequest,
     ImageResponse,
     Issue,
     PublicData,
     RiskRequest,
     RiskResponse,
 )
+from app.services import masking_service, ocr_service
 
 router = APIRouter()
 
 
 @router.post("/analyze/image", response_model=ImageResponse)
-async def analyze_image(req: ImageRequest):
+async def analyze_image(file: UploadFile = File(...)):
+    """
+    1단계: 계약서 이미지 분석
+    - CLOVA OCR 텍스트 추출
+    - 개인정보 비식별화
+    - Redis 세션 생성
+    """
+    image_bytes = await file.read()
+
+    # 1. OCR 실행
+    ocr_result = await ocr_service.run_ocr(image_bytes)
+    ocr_text = ocr_result["text"]
+    raw_address = ocr_result["address"]
+
+    if not ocr_text.strip():
+        raise AppException(422, "OCR_FAILED", "텍스트를 추출할 수 없습니다.")
+
+    # 2. 비식별화 (팀원2 - masking_service)
+    masking_result = masking_service.run_masking(ocr_text)
+    masked_text = masking_result["masked_text"]
+    mapping = masking_result["mapping"]
+
+    # 3. 전세금 추출
+    jeonse_amount = _extract_jeonse_amount(ocr_text)
+
+    # 4. 세션 생성 및 Redis 저장
+    session_id = new_session_id()
+    await create_session(
+        session_id,
+        {
+            KEY_OCR_TEXT: ocr_text,
+            KEY_MASKED_TEXT: masked_text,
+            KEY_MAPPING: mapping,
+            KEY_RAW_ADDRESS: raw_address,
+            KEY_JEONSE_AMOUNT: jeonse_amount,
+            KEY_STEPS_COMPLETED: [1],
+        },
+    )
+
     return ImageResponse(
-        session_id=new_session_id(),
-        ocr_text="임대인 홍길동, 임차인 김철수. 전세금 이억원. 주소 서울시 강남구 역삼동 123-45.",
-        masked_text="임대인 [PERSON_001], 임차인 [PERSON_002]. 전세금 이억원. 주소 [ADDR_001].",
-        address="서울시 강남구 역삼동 123-45",
+        session_id=session_id,
+        ocr_text=ocr_text,
+        masked_text=masked_text,
+        address=raw_address,
     )
 
 
 @router.post("/analyze/risk", response_model=RiskResponse)
 async def analyze_risk(req: RiskRequest):
+    """
+    4단계: AI 리스크 분석
+    TODO: 팀원2가 risk_service.py 완성 후 실제 구현으로 교체
+    """
     return RiskResponse(
         score=25,
         level="danger",
@@ -56,3 +108,23 @@ async def analyze_risk(req: RiskRequest):
         ),
         mapping_table_purged=True,
     )
+
+
+def _extract_jeonse_amount(text: str) -> int:
+    """
+    텍스트에서 전세금 추출
+    예: "보증금 2억 5천만원" → 250_000_000
+    """
+    import re
+
+    match = re.search(r"(\d+)\s*억\s*(\d+)?\s*천?\s*만?", text)
+    if match:
+        uk = int(match.group(1))
+        chun = int(match.group(2)) if match.group(2) else 0
+        return uk * 100_000_000 + chun * 10_000_000
+
+    match = re.search(r"(\d+)\s*만\s*원", text)
+    if match:
+        return int(match.group(1)) * 10_000
+
+    return 0
