@@ -14,8 +14,8 @@ class Settings(BaseSettings):
 
     MOLIT_API_KEY: str = "ebc04b0dad1f5bad095b461d47c888dd534457a79bc29aacea0285a40a3b30d7"
     APT_TRADE_API_URL: str = "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
-    ROWHOUSE_TRADE_API_URL: str = ""
-    OFFICETEL_TRADE_API_URL: str = ""
+    ROWHOUSE_TRADE_API_URL: str = "https://apis.data.go.kr/1613000/RTMSDataSvcRHTrade/getRTMSDataSvcRHTrade"
+    OFFICETEL_TRADE_API_URL: str = "http://apis.data.go.kr/1613000/RTMSDataSvcOffiTrade/getRTMSDataSvcOffiTrade"
 
     SESSION_SECRET_KEY: str = "guardup-test-secret-key-2026"
 

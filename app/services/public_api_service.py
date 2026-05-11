@@ -29,6 +29,117 @@ def parse_jibun(jibun_address: str | None) -> tuple[str, str]:
     return bun.zfill(4), ji.zfill(4)
 
 
+def normalize_building_name(name: str | None) -> str:
+    if not name:
+        return ""
+
+    normalized = name.strip()
+    normalized = normalized.replace(" ", "")
+    normalized = normalized.replace(",", "")
+    normalized = normalized.replace(".", "")
+    normalized = normalized.replace("아파트", "")
+    normalized = normalized.replace("오피스텔", "")
+    normalized = normalized.replace("연립", "")
+    normalized = normalized.replace("다세대", "")
+    normalized = normalized.replace("주택", "")
+    return normalized
+
+
+def get_deal_ymd_candidates(months: int = 12) -> list[str]:
+    now = datetime.now()
+    candidates = []
+
+    for i in range(months):
+        year = now.year
+        month = now.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        candidates.append(f"{year}{month:02d}")
+
+    return candidates
+
+
+def parse_trade_amount(text: str | None) -> int | None:
+    if not text:
+        return None
+
+    cleaned = text.replace(",", "").replace(" ", "").strip()
+    if not cleaned:
+        return None
+
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+async def fetch_trade_price_by_name(
+    api_url: str,
+    building_name: str | None,
+    bjd_code: str | None,
+    name_fields: list[str],
+) -> int | None:
+    if not api_url or not building_name or not bjd_code or len(bjd_code) < 5:
+        return None
+
+    lawd_cd = bjd_code[:5]
+    target_name = normalize_building_name(building_name)
+    if not target_name:
+        return None
+
+    deal_ymd_candidates = get_deal_ymd_candidates(12)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for deal_ymd in deal_ymd_candidates:
+                response = await client.get(
+                    api_url,
+                    params={
+                        "serviceKey": settings.MOLIT_API_KEY,
+                        "LAWD_CD": lawd_cd,
+                        "DEAL_YMD": deal_ymd,
+                    },
+                )
+                response.raise_for_status()
+
+                root = ET.fromstring(response.text)
+                items = root.findall(".//item")
+
+                for item in items:
+                    trade_name = ""
+
+                    for field in name_fields:
+                        value = item.findtext(field)
+                        if value and value.strip():
+                            trade_name = value.strip()
+                            break
+
+                    deal_amount = (
+                        item.findtext("dealAmount")
+                        or item.findtext("거래금액")
+                        or ""
+                    ).strip()
+
+                    if not trade_name or not deal_amount:
+                        continue
+
+                    normalized_trade_name = normalize_building_name(trade_name)
+
+                    if (
+                        normalized_trade_name in target_name
+                        or target_name in normalized_trade_name
+                    ):
+                        parsed_amount = parse_trade_amount(deal_amount)
+                        if parsed_amount is not None:
+                            return parsed_amount
+
+        return None
+
+    except Exception:
+        return None
+
+
 async def verify_address(address: str) -> AddressResponse:
     address = address.strip()
 
@@ -88,79 +199,42 @@ async def verify_address(address: str) -> AddressResponse:
         bjd_code=first.get("admCd"),
     )
 
+
 async def get_apartment_sale_price(
     building_name: str | None,
     bjd_code: str | None,
 ) -> int | None:
-    if not building_name or not bjd_code or len(bjd_code) < 5:
-        return None
+    return await fetch_trade_price_by_name(
+        api_url=settings.APT_TRADE_API_URL,
+        building_name=building_name,
+        bjd_code=bjd_code,
+        name_fields=["aptNm", "아파트"],
+    )
 
-    lawd_cd = bjd_code[:5]
-    target_name = building_name.replace(" ", "").replace(",", "").replace("아파트", "")
-    now = datetime.now()
 
-    deal_ymd_candidates = []
-    for i in range(12):
-        year = now.year
-        month = now.month - i
-        while month <= 0:
-            month += 12
-            year -= 1
-        deal_ymd_candidates.append(f"{year}{month:02d}")
+async def get_rowhouse_sale_price(
+    building_name: str | None,
+    bjd_code: str | None,
+) -> int | None:
+    return await fetch_trade_price_by_name(
+        api_url=settings.ROWHOUSE_TRADE_API_URL,
+        building_name=building_name,
+        bjd_code=bjd_code,
+        name_fields=["mhouseNm", "연립다세대", "건물명"],
+    )
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for deal_ymd in deal_ymd_candidates:
-                response = await client.get(
-                    settings.APT_TRADE_API_URL,
-                    params={
-                        "serviceKey": settings.MOLIT_API_KEY,
-                        "LAWD_CD": lawd_cd,
-                        "DEAL_YMD": deal_ymd,
-                    },
-                )
-                response.raise_for_status()
 
-                root = ET.fromstring(response.text)
-                items = root.findall(".//item")
+async def get_officetel_sale_price(
+    building_name: str | None,
+    bjd_code: str | None,
+) -> int | None:
+    return await fetch_trade_price_by_name(
+        api_url=settings.OFFICETEL_TRADE_API_URL,
+        building_name=building_name,
+        bjd_code=bjd_code,
+        name_fields=["offiNm", "오피스텔", "건물명"],
+    )
 
-                for item in items:
-                    apt_nm = (
-                        item.findtext("aptNm")
-                        or item.findtext("아파트")
-                        or ""
-                    ).strip()
-
-                    deal_amount = (
-                        item.findtext("dealAmount")
-                        or item.findtext("거래금액")
-                        or ""
-                    ).strip()
-
-                    if not apt_nm or not deal_amount:
-                        continue
-
-                    normalized_apt_nm = (
-                        apt_nm.replace(" ", "")
-                        .replace(",", "")
-                        .replace("아파트", "")
-                    )
-
-                    if (
-                        normalized_apt_nm in target_name
-                        or target_name in normalized_apt_nm
-                    ):
-                        try:
-                            return int(
-                                deal_amount.replace(",", "").replace(" ", "")
-                            )
-                        except ValueError:
-                            continue
-
-        return None
-
-    except Exception:
-        return None
 
 async def get_building_info(
     road_address: str,
@@ -224,7 +298,12 @@ async def get_building_info(
             item = {}
 
         building_name = item.get("bldNm")
+
         sale_price = await get_apartment_sale_price(building_name, bjd_code)
+        if sale_price is None:
+            sale_price = await get_rowhouse_sale_price(building_name, bjd_code)
+        if sale_price is None:
+            sale_price = await get_officetel_sale_price(building_name, bjd_code)
 
         return BuildingResponse(
             building_name=building_name,
@@ -246,5 +325,3 @@ async def get_building_info(
             sale_price=None,
             jeonse_ratio=None,
         )
-    
-    
