@@ -2,6 +2,8 @@ from fastapi import APIRouter, File, UploadFile
 
 from app.core.exceptions import AppException
 from app.core.session import (
+    KEY_BJD_CODE,
+    KEY_BUILDING,
     KEY_JEONSE_AMOUNT,
     KEY_MAPPING,
     KEY_MASKED_TEXT,
@@ -9,7 +11,9 @@ from app.core.session import (
     KEY_RAW_ADDRESS,
     KEY_STEPS_COMPLETED,
     create_session,
+    get_session,
     new_session_id,
+    purge_mapping,
 )
 from app.schemas.analyze import (
     ImageResponse,
@@ -18,7 +22,7 @@ from app.schemas.analyze import (
     RiskRequest,
     RiskResponse,
 )
-from app.services import masking_service, ocr_service
+from app.services import masking_service, ocr_service, risk_service
 
 router = APIRouter()
 
@@ -75,39 +79,62 @@ async def analyze_image(file: UploadFile = File(...)):
 async def analyze_risk(req: RiskRequest):
     """
     4단계: AI 리스크 분석
-    TODO: 팀원2가 risk_service.py 완성 후 실제 구현으로 교체
+    - 세션에서 masked_text, building 데이터 조회
+    - RAG + GPT-4o 독소 조항 분석
+    - 규칙 기반 리스크 점수 산출
     """
+    session = await get_session(req.session_id)
+    if not session:
+        raise AppException(404, "SESSION_NOT_FOUND", "세션이 만료되었거나 존재하지 않습니다.")
+
+    masked_text = session.get(KEY_MASKED_TEXT, "")
+    if not masked_text:
+        raise AppException(422, "NO_MASKED_TEXT", "분석할 계약서 텍스트가 없습니다. 1단계부터 다시 진행해 주세요.")
+
+    # 공공 API 단계에서 저장된 building 데이터 (없으면 기본값 사용)
+    building: dict = session.get(KEY_BUILDING) or {}
+    bjd_code: str | None = session.get(KEY_BJD_CODE)
+
+    jeonse_ratio_pct = _parse_ratio(building.get("jeonse_ratio"))
+    is_registered: bool = building.get("is_registered", True)
+    mortgage_amount: int = building.get("mortgage_amount") or 0
+    sale_price: int = building.get("sale_price") or 0
+    mortgage_ratio_pct = (mortgage_amount / sale_price * 100) if sale_price > 0 else 0.0
+
+    # 리스크 분석 (동기 함수 — RAG + GPT)
+    result = risk_service.calculate_risk(
+        masked_text=masked_text,
+        jeonse_ratio_pct=jeonse_ratio_pct,
+        is_registered=is_registered,
+        mortgage_ratio_pct=mortgage_ratio_pct,
+        bjd_code=bjd_code,
+    )
+
+    # 분석 완료 후 개인정보 매핑 테이블 파기
+    await purge_mapping(req.session_id)
+
     return RiskResponse(
-        score=25,
-        level="danger",
-        issues=[
-            Issue(
-                clause="임대인은 임차인에게 사전 통보 없이 보증금을 감액할 수 있다.",
-                reason="임차인 동의 없는 보증금 감액은 주택임대차보호법 위반입니다.",
-                severity=5,
-            )
-        ],
-        action_guide=[
-            {"type": "stop", "message": "계약서에 독소 조항이 발견되었습니다. 즉시 날인을 중단하세요."},
-            {
-                "type": "institution",
-                "name": "서울 자립지원 전담기관",
-                "phone": "02-000-0000",
-                "region": "서울특별시",
-                "address": "서울시 종로구 OO로 00",
-            },
-            {
-                "type": "legal",
-                "message": "전세사기 피해 신고는 경찰청 112 또는 LH콜센터 1600-1004로 연락하세요.",
-            },
-        ],
+        score=result["score"],
+        level=result["level"],
+        issues=[Issue(**i) for i in result["issues"]],
+        action_guide=result["action_guide"],
         public_data=PublicData(
-            jeonse_ratio="83%",
-            is_registered=True,
-            mortgage_amount=50000000,
+            jeonse_ratio=building.get("jeonse_ratio") or "정보 없음",
+            is_registered=is_registered,
+            mortgage_amount=mortgage_amount or None,
         ),
         mapping_table_purged=True,
     )
+
+
+def _parse_ratio(ratio_str: str | None) -> float:
+    """'83%' → 83.0, None → 0.0"""
+    if not ratio_str:
+        return 0.0
+    try:
+        return float(ratio_str.replace("%", "").strip())
+    except ValueError:
+        return 0.0
 
 
 def _extract_jeonse_amount(text: str) -> int:
