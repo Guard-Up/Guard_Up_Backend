@@ -1,0 +1,20 @@
+{
+  "institutions": [
+    {
+      "id": "inst_001",
+      "name": "서울 자립지원 전담기관",
+      "region": "서울특별시",
+      "bjd_prefix": "11",
+      "phone": "02-000-0000",
+      "address": "서울시 종로구 OO로 00"
+    },
+    {
+      "id": "inst_002",
+      "name": "경기 자립지원 전담기관",
+      "region": "경기도",
+      "bjd_prefix": "41",
+      "phone": "031-000-0000",
+      "address": "경기도 수원시 OO로 00"
+    }
+  ]
+}
