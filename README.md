@@ -1,3 +1,4 @@
+develop
 # Guard Up Backend
 
 > 자립준비청년을 위한 전세 계약서 분석 서비스 — **안심 계약 가디언** 백엔드
@@ -173,3 +174,7 @@ API 문서: http://localhost:8000/docs
 ```
 
 GPT-4o에는 실명·주소가 절대 전달되지 않습니다.
+=======
+# Guard_Up_Backend
+안심 계약 가디언 백엔드 서버 | FastAPI 기반 OCR·비식별화·RAG·공공API 파이프라인
+main
