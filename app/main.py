@@ -25,12 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=settings.SESSION_SECRET_KEY,
-)
-
-
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
     return JSONResponse(
@@ -40,7 +34,7 @@ async def app_exception_handler(request: Request, exc: AppException):
 
 @app.on_event("startup")
 async def startup():
-    pass
+    load_legal_documents()
 
 
 app.include_router(analyze.router, prefix="/api")

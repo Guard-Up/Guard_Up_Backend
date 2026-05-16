@@ -6,8 +6,6 @@ from pydantic import BaseModel
 class BuildingRequest(BaseModel):
     session_id: str
     road_address: str
-    jibun_address: Optional[str] = None
-    bjd_code: Optional[str] = None
 
 
 class BuildingResponse(BaseModel):
