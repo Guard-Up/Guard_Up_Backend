@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.schemas.address import AddressRequest, AddressResponse
 from app.services.public_api_service import verify_address as verify_address_service
-from app.core.session import get_session, update_session, KEY_ROAD_ADDRESS, KEY_BJD_CODE
+from app.core.session import get_session, update_session, KEY_ROAD_ADDRESS, KEY_BJD_CODE, KEY_JIBUN_ADDRESS
 
 router = APIRouter()
 
@@ -33,6 +33,7 @@ async def verify_address(req: AddressRequest, request: Request) -> AddressRespon
     await update_session(req.session_id, {
         KEY_ROAD_ADDRESS: result.road_address,
         KEY_BJD_CODE: result.bjd_code,
+        KEY_JIBUN_ADDRESS: result.jibun_address,
     })
 
     return result

@@ -22,11 +22,11 @@ _JEONSE_RATIO_DEDUCTIONS = [
     (70, 10),
 ]
 
-_MORTGAGE_RATIO_DEDUCTIONS = [
-    (30, 20),
-    (10, 10),
-    (0,   5),
-]
+#_MORTGAGE_RATIO_DEDUCTIONS = [     # TODO: 등기부등본 API 연동 시 복구
+#    (30, 20),
+#    (10, 10),
+#    (0,   5),
+#]
 
 _SEVERITY_DEDUCTIONS = {5: 25, 4: 15, 3: 10, 2: 5, 1: 2}
 
@@ -60,7 +60,7 @@ def calculate_risk(
     masked_text: str,
     jeonse_ratio_pct: float,
     is_registered: bool,
-    mortgage_ratio_pct: float = 0.0,
+    # mortgage_ratio_pct: float = 0.0,    # TODO: 등기부등본 API 연동 시 복구
     bjd_code: Optional[str] = None,
 ) -> dict:
     """
@@ -79,10 +79,15 @@ def calculate_risk(
     rag_clauses = search_relevant_clauses(masked_text, n_results=5)
     gpt_issues = _analyze_with_gpt(masked_text, rag_clauses)
     public_issues = _build_public_data_issues(
-        jeonse_ratio_pct, is_registered, mortgage_ratio_pct
+        jeonse_ratio_pct, is_registered, # mortgage_ratio_pct   # TODO: 등기부등본 API 연동 시 복구
     )
 
-    score = _calculate_score(jeonse_ratio_pct, is_registered, mortgage_ratio_pct, gpt_issues)
+    score = _calculate_score(
+        jeonse_ratio_pct, 
+        is_registered, 
+        #mortgage_ratio_pct,    # TODO: 등기부등본 API 연동 시 복구
+        gpt_issues
+    )
     level = _score_to_level(score, is_registered)
     action_guide = _build_action_guide(level, bjd_code)
 

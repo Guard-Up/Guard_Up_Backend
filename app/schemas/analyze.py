@@ -26,7 +26,7 @@ class Issue(BaseModel):
 class PublicData(BaseModel):
     jeonse_ratio: str
     is_registered: bool
-    mortgage_amount: Optional[int] = None
+    # mortgage_amount: Optional[int] = None     # TODO: 등기부등본 API 연동 시 복구
 
 
 class RiskResponse(BaseModel):

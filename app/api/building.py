@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.schemas.building import BuildingRequest, BuildingResponse
 from app.services.public_api_service import get_building_info
-from app.core.session import (get_session, update_session, KEY_ROAD_ADDRESS, KEY_BJD_CODE, KEY_BUILDING, KEY_JEONSE_AMOUNT)
+from app.core.session import (get_session, update_session, KEY_ROAD_ADDRESS, KEY_BJD_CODE, KEY_BUILDING, KEY_JEONSE_AMOUNT, KEY_JIBUN_ADDRESS)
 
 router = APIRouter()
 
@@ -19,6 +19,7 @@ async def get_building(req: BuildingRequest, request: Request) -> BuildingRespon
     road_address = session.get(KEY_ROAD_ADDRESS)
     bjd_code = session.get(KEY_BJD_CODE)
     jeonse_amount = session.get(KEY_JEONSE_AMOUNT)
+    jibun_address = session.get(KEY_JIBUN_ADDRESS)
 
     if not road_address:
         raise HTTPException(
@@ -29,7 +30,7 @@ async def get_building(req: BuildingRequest, request: Request) -> BuildingRespon
     try:
         result = await get_building_info(
             road_address=road_address,
-            jibun_address=None,
+            jibun_address=jibun_address,
             bjd_code=bjd_code,
         )
     except Exception:
@@ -55,9 +56,9 @@ async def get_building(req: BuildingRequest, request: Request) -> BuildingRespon
         "is_registered": result.is_registered,
     }
     if result.sale_price is not None:
-            building_data["sale_price"] = result.sale_price
+        building_data["sale_price"] = result.sale_price
     if jeonse_ratio is not None:
-            building_data["jeonse_ratio"] = jeonse_ratio
+        building_data["jeonse_ratio"] = jeonse_ratio
 
     await update_session(req.session_id, {KEY_BUILDING: building_data})
 

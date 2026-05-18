@@ -97,16 +97,16 @@ async def analyze_risk(req: RiskRequest):
 
     jeonse_ratio_pct = _parse_ratio(building.get("jeonse_ratio"))
     is_registered: bool = building.get("is_registered", True)
-    mortgage_amount: int = building.get("mortgage_amount") or 0
+    # mortgage_amount: int = building.get("mortgage_amount") or 0   # TODO: 등기부등본 API 연동 시 복구
     sale_price: int = building.get("sale_price") or 0
-    mortgage_ratio_pct = (mortgage_amount / sale_price * 100) if sale_price > 0 else 0.0
+    # mortgage_ratio_pct = (mortgage_amount / sale_price * 100) if sale_price > 0 else 0.0 # TODO: 등기부등본 API 연동 시 복구
 
     # 리스크 분석 (동기 함수 — RAG + GPT)
     result = risk_service.calculate_risk(
         masked_text=masked_text,
         jeonse_ratio_pct=jeonse_ratio_pct,
         is_registered=is_registered,
-        mortgage_ratio_pct=mortgage_ratio_pct,
+        # mortgage_ratio_pct=mortgage_ratio_pct,    # TODO: 등기부등본 API 연동 시 복구
         bjd_code=bjd_code,
     )
 
@@ -121,7 +121,7 @@ async def analyze_risk(req: RiskRequest):
         public_data=PublicData(
             jeonse_ratio=building.get("jeonse_ratio") or "정보 없음",
             is_registered=is_registered,
-            mortgage_amount=mortgage_amount or None,
+            # mortgage_amount=mortgage_amount or None,  # TODO: 등기부등본 API 연동 시 복구
         ),
         mapping_table_purged=True,
     )
