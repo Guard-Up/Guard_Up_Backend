@@ -104,7 +104,6 @@ def calculate_risk(
 def _calculate_score(
     jeonse_ratio_pct: float,
     is_registered: bool,
-    mortgage_ratio_pct: float,
     issues: list[dict],
 ) -> int:
     deduction = 0
@@ -116,12 +115,6 @@ def _calculate_score(
 
     if not is_registered:
         deduction += 30
-
-    if mortgage_ratio_pct > 0:
-        for threshold, pts in _MORTGAGE_RATIO_DEDUCTIONS:
-            if mortgage_ratio_pct >= threshold:
-                deduction += pts
-                break
 
     for issue in issues:
         deduction += _SEVERITY_DEDUCTIONS.get(issue.get("severity", 0), 0)
@@ -143,7 +136,6 @@ def _score_to_level(score: int, is_registered: bool) -> str:
 def _build_public_data_issues(
     jeonse_ratio_pct: float,
     is_registered: bool,
-    mortgage_ratio_pct: float,
 ) -> list[dict]:
     """공공데이터 기반 위험요소를 issue 형태로 변환"""
     issues: list[dict] = []
@@ -172,25 +164,6 @@ def _build_public_data_issues(
             "clause": "건물 미등기",
             "reason": "등기부등본이 없어 소유권 확인이 불가능합니다. 대항력·우선변제권 보호를 받을 수 없으므로 계약을 중단하세요.",
             "severity": 5,
-        })
-
-    if mortgage_ratio_pct >= 30:
-        issues.append({
-            "clause": f"근저당 {mortgage_ratio_pct:.0f}% 설정",
-            "reason": "매매가의 30% 이상 근저당이 설정되어 경매 시 보증금 회수가 매우 어렵습니다.",
-            "severity": 4,
-        })
-    elif mortgage_ratio_pct >= 10:
-        issues.append({
-            "clause": f"근저당 {mortgage_ratio_pct:.0f}% 설정",
-            "reason": "건물에 근저당이 설정되어 있어 경매 시 보증금 회수에 영향을 줄 수 있습니다.",
-            "severity": 3,
-        })
-    elif mortgage_ratio_pct > 0:
-        issues.append({
-            "clause": f"근저당 {mortgage_ratio_pct:.0f}% 설정",
-            "reason": "건물에 근저당이 설정되어 있어 주의가 필요합니다.",
-            "severity": 2,
         })
 
     return issues
