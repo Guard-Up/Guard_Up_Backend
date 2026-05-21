@@ -281,8 +281,8 @@ async def get_building_info(
             return BuildingResponse(
                 building_name=None,
                 build_year=None,
-                owner_type=None,
-                mortgage_amount=None,
+                # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+                # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
                 is_registered=False,
                 sale_price=None,
                 jeonse_ratio=None,
@@ -299,6 +299,9 @@ async def get_building_info(
 
         building_name = item.get("bldNm")
 
+        use_apr_day = item.get("useAprDay")
+        build_year = int(use_apr_day[:4]) if use_apr_day and len(use_apr_day) >= 4 else None
+
         sale_price = await get_apartment_sale_price(building_name, bjd_code)
         if sale_price is None:
             sale_price = await get_rowhouse_sale_price(building_name, bjd_code)
@@ -307,9 +310,9 @@ async def get_building_info(
 
         return BuildingResponse(
             building_name=building_name,
-            build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
+            build_year=build_year,
+            # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+            # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
             is_registered=True,
             sale_price=sale_price,
             jeonse_ratio=None,
@@ -319,9 +322,10 @@ async def get_building_info(
         return BuildingResponse(
             building_name=None,
             build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
+            # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+            # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
             is_registered=False,
             sale_price=None,
             jeonse_ratio=None,
         )
+    
