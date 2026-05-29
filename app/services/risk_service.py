@@ -33,23 +33,32 @@ _SEVERITY_DEDUCTIONS = {5: 25, 4: 15, 3: 10, 2: 5, 1: 2}
 # ── GPT 프롬프트 ──────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """당신은 한국 전세계약서 전문 법률 분석가입니다.
-계약서 텍스트에서 임차인에게 불리한 독소 조항을 찾아 심각도를 평가하세요.
+계약서 텍스트에서 임차인에게 불리한 독소 조항을 찾아 심각도와 법적 근거 여부를 평가하세요.
 
 출력 형식 (JSON 배열만 반환, 다른 텍스트 금지):
 [
   {
     "clause": "문제 조항 원문 또는 요약 (50자 이내)",
     "reason": "위험 이유 및 법적 근거 (100자 이내)",
-    "severity": 5
+    "severity": 5,
+    "is_legal_basis": true
   }
 ]
 
-심각도 기준:
+심각도(severity) 기준:
 5: 계약 즉시 중단 (전입신고 금지, 임의 해지 등 주택임대차보호법 강행규정 위반)
 4: 매우 불리 (보증금 감액, 갱신권 포기 등)
 3: 불리 (포괄적 수선의무 전가, 과도한 원상복구 등)
 2: 주의 (관리비 불명확, 잔금 조건 모호 등)
 1: 경미 (표준계약서 미비사항)
+
+is_legal_basis 판단 기준:
+- true: 주택임대차보호법 강행규정 위반 (제3, 6의3, 7, 10조 등) → 임차인 동의해도 무효
+- false: 민법 위반이지만 임차인 동의 시 유효 (수선의무 전가, 원상복구 등)
+- false: 표준계약서 미준수 (강제 아닌 권장사항)
+- 판단 모호 시 → false (보수적 분류)
+
+참고 법률 조항에 is_legal_basis가 명시되어 있다면 그 값을 우선 따르세요.
 
 독소 조항이 없으면 빈 배열 []을 반환하세요."""
 
@@ -145,18 +154,21 @@ def _build_public_data_issues(
             "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
             "reason": "매매가 대비 전세금 비율이 90% 이상으로 깡통전세 위험이 매우 높습니다.",
             "severity": 5,
+            "is_legal_basis": True,
         })
     elif jeonse_ratio_pct >= 80:
         issues.append({
             "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
             "reason": "매매가 대비 전세금 비율이 80% 이상으로 깡통전세 가능성이 있습니다.",
             "severity": 4,
+            "is_legal_basis": True,
         })
     elif jeonse_ratio_pct >= 70:
         issues.append({
             "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
             "reason": "매매가 대비 전세금 비율이 70% 이상으로 주의가 필요합니다.",
             "severity": 3,
+            "is_legal_basis": True,
         })
 
     if not is_registered:
@@ -164,14 +176,17 @@ def _build_public_data_issues(
             "clause": "건물 미등기",
             "reason": "등기부등본이 없어 소유권 확인이 불가능합니다. 대항력·우선변제권 보호를 받을 수 없으므로 계약을 중단하세요.",
             "severity": 5,
+            "is_legal_basis": True,
         })
 
     return issues
 
 
 def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
+    # RAG 결과에 is_legal_basis 포함해서 GPT가 참고할 수 있도록 컨텍스트 구성
     rag_context = "\n".join(
-        f"[{c['category']}] {c['content']}" for c in rag_clauses
+        f"[{c['category']}] (is_legal_basis={c.get('is_legal_basis', False)}) {c['content']}"
+        for c in rag_clauses
     )
     user_message = f"참고 법률 조항:\n{rag_context}\n\n분석할 계약서:\n{masked_text}"
 
@@ -191,6 +206,7 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
                 "clause": str(item.get("clause", "")),
                 "reason": str(item.get("reason", "")),
                 "severity": min(5, max(1, int(item.get("severity", 1)))),
+                "is_legal_basis": bool(item.get("is_legal_basis", False)),
             }
             for item in raw
             if isinstance(item, dict)
