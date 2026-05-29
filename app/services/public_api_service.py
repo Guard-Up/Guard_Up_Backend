@@ -248,8 +248,8 @@ async def get_building_info(
         return BuildingResponse(
             building_name=None,
             build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
+            # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+            # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
             is_registered=False,
             sale_price=None,
             jeonse_ratio=None,

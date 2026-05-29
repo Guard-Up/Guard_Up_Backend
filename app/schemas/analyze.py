@@ -21,6 +21,7 @@ class Issue(BaseModel):
     clause: str
     reason: str
     severity: int  # 1~5
+    is_legal_basis: bool  # true: 강행규정 위반(법적 무효), false: 임차인 동의 시 유효(개인 체크 권장)
 
 
 class PublicData(BaseModel):
