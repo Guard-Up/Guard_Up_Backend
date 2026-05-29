@@ -2,13 +2,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from starlette.middleware.sessions import SessionMiddleware
-
-from app.api import (address, analyze, building, health, institution)
-# , risk)
+from app.api import address, analyze, building, health, institution
 from app.core.exceptions import AppException
-from app.core.config import settings
-
 from app.services.rag_service import load_legal_documents
 
 app = FastAPI(
@@ -42,4 +37,3 @@ app.include_router(address.router, prefix="/api")
 app.include_router(building.router, prefix="/api")
 app.include_router(institution.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
-# app.include_router(risk.router, prefix="/api")  # 이 줄 추가
