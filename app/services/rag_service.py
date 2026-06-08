@@ -76,6 +76,7 @@ def search_relevant_clauses(masked_text: str, n_results: int = 5) -> list[dict]:
                 "content": doc.page_content,
                 "law": doc.metadata.get("law", ""),
                 "category": doc.metadata.get("category", ""),
+                "is_legal_basis": doc.metadata.get("is_legal_basis", False),
                 "score": float(score),
             }
             for doc, score in results
@@ -127,6 +128,7 @@ def load_legal_documents() -> None:
                     metadata={
                         "law": item.get("law", ""),
                         "category": item.get("category", ""),
+                        "is_legal_basis": item.get("is_legal_basis", False),
                     },
                 )
             )

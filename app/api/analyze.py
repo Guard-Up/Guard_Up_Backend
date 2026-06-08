@@ -81,15 +81,20 @@ async def analyze_risk(req: RiskRequest):
     4단계: AI 리스크 분석
     - 세션에서 masked_text, building 데이터 조회
     - RAG + GPT-4o 독소 조항 분석
-    - 규칙 기반 리스크 점수 산출
+    - 규칙 기반 리스크 점수 산출 
     """
     session = await get_session(req.session_id)
     if not session:
-        raise AppException(404, "SESSION_NOT_FOUND", "세션이 만료되었거나 존재하지 않습니다.")
+        raise AppException(400, "INVALID_SESSION", "세션이 만료되었거나 존재하지 않습니다.")
+
+    # 선행 단계(2: 주소검증, 3: 건물조회) 완료 여부 확인
+    steps = session.get(KEY_STEPS_COMPLETED, [])
+    if 2 not in steps or 3 not in steps:
+        raise AppException(424, "PREREQUISITE_FAILED", "이전 단계(주소 검증·건물 조회)가 완료되지 않았습니다.")
 
     masked_text = session.get(KEY_MASKED_TEXT, "")
     if not masked_text:
-        raise AppException(422, "NO_MASKED_TEXT", "분석할 계약서 텍스트가 없습니다. 1단계부터 다시 진행해 주세요.")
+        raise AppException(400, "INVALID_SESSION", "분석할 계약서 텍스트가 없습니다. 처음부터 다시 진행해 주세요.")
 
     # 공공 API 단계에서 저장된 building 데이터 (없으면 기본값 사용)
     building: dict = session.get(KEY_BUILDING) or {}

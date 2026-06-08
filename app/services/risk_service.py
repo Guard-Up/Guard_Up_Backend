@@ -115,6 +115,10 @@ def _calculate_score(
     is_registered: bool,
     issues: list[dict],
 ) -> int:
+    # 미등기는 소유권 확인 불가 = 최악의 위험. 다른 항목과 무관하게 0점 고정
+    if not is_registered:
+        return 0
+
     deduction = 0
 
     for threshold, pts in _JEONSE_RATIO_DEDUCTIONS:
