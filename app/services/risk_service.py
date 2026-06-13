@@ -5,12 +5,14 @@
 - 규칙 기반: 전세가율 / 등기 / 근저당 감점
 """
 import json
+import re
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
+from app.core.exceptions import AppException
 from app.services.institution_service import get_by_bjd_code
 from app.services.rag_service import search_relevant_clauses
 
@@ -196,7 +198,7 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
 
     try:
         llm = ChatOpenAI(
-            model="gpt-4o",
+            model=settings.GPT_MODEL,
             api_key=settings.OPENAI_API_KEY,
             temperature=0,
         )
@@ -204,19 +206,34 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
             SystemMessage(content=_SYSTEM_PROMPT),
             HumanMessage(content=user_message),
         ])
-        raw = json.loads(response.content)
-        return [
-            {
-                "clause": str(item.get("clause", "")),
-                "reason": str(item.get("reason", "")),
-                "severity": min(5, max(1, int(item.get("severity", 1)))),
-                "is_legal_basis": bool(item.get("is_legal_basis", False)),
-            }
-            for item in raw
-            if isinstance(item, dict)
-        ]
-    except Exception:
-        return []
+    except Exception as e:
+        # 호출 실패(쿼터/네트워크 등)는 빈 결과로 숨기지 말고 502로 드러낸다
+        raise AppException(502, "AI_MODULE_ERROR", f"AI 분석 호출 실패: {e}")
+
+    try:
+        raw = json.loads(_strip_code_fence(response.content))
+    except Exception as e:
+        raise AppException(502, "AI_MODULE_ERROR", f"AI 응답 파싱 실패: {e}")
+
+    return [
+        {
+            "clause": str(item.get("clause", "")),
+            "reason": str(item.get("reason", "")),
+            "severity": min(5, max(1, int(item.get("severity", 1)))),
+            "is_legal_basis": bool(item.get("is_legal_basis", False)),
+        }
+        for item in raw
+        if isinstance(item, dict)
+    ]
+
+
+def _strip_code_fence(text: str) -> str:
+    """GPT가 ```json ... ``` 코드펜스로 감싼 경우 제거."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
 
 
 def _build_action_guide(level: str, bjd_code: Optional[str]) -> list[dict]:

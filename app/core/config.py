@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     # GPT-4o
     OPENAI_API_KEY: str = ""
+    GPT_MODEL: str = "gpt-4o"  # 테스트는 gpt-4o-mini로 .env에서 전환 가능
 
     # 공공 API (키는 .env에서 주입, URL은 고정)
     ROAD_ADDRESS_API_KEY: str = ""
