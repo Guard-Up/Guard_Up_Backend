@@ -62,6 +62,12 @@ is_legal_basis 판단 기준:
 
 참고 법률 조항에 is_legal_basis가 명시되어 있다면 그 값을 우선 따르세요.
 
+오탐 방지 (정상 조항을 독소로 분류하지 말 것):
+- 참고 법률 조항에 예외·조건·임차인 귀책사유가 명시되어 있으면 반드시 반영하라.
+- 조건부 해지는 독소가 아니다. 예: "임차인이 2기 이상 차임을 연체한 경우 임대인이 해지" 등 임차인의 귀책사유나 법정 사유에 근거한 해지는 정당하다.
+- 주택임대차보호법·표준계약서가 인정하는 표준 조항(2년 임대차 보장, 계약갱신요구권, 분쟁조정 신청, 통상 마모를 제외한 원상복구 등)은 독소가 아니다.
+- 조항의 조건을 무시하고 일부 문구만으로 판단하지 마라. 임대인의 권한이 무조건적·일방적일 때만 독소로 본다.
+
 독소 조항이 없으면 빈 배열 []을 반환하세요."""
 
 
@@ -99,7 +105,7 @@ def calculate_risk(
         #mortgage_ratio_pct,    # TODO: 등기부등본 API 연동 시 복구
         gpt_issues
     )
-    level = _score_to_level(score, is_registered)
+    level = _score_to_level(score, is_registered, jeonse_ratio_pct)
     action_guide = _build_action_guide(level, bjd_code)
 
     return {
@@ -137,13 +143,16 @@ def _calculate_score(
     return max(0, 100 - deduction)
 
 
-def _score_to_level(score: int, is_registered: bool) -> str:
+def _score_to_level(score: int, is_registered: bool, jeonse_ratio_pct: float = 0.0) -> str:
     # 미등기는 점수 무관 강제 danger (소유권 확인 불가 = 보호 불가)
     if not is_registered:
         return "danger"
-    if score >= 70:
+    # 깡통전세(전세가율 90% 이상)는 점수 무관 강제 danger (전세사기 1순위 신호)
+    if jeonse_ratio_pct >= 90:
+        return "danger"
+    if score >= 90:
         return "safe"
-    elif score >= 40:
+    elif score >= 70:
         return "caution"
     return "danger"
 
