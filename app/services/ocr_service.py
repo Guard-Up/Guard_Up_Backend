@@ -83,17 +83,18 @@ def _extract_text(ocr_response: dict) -> str:
     return "\n".join(lines)
 
 
+# 시/도로 시작, 사이의 공백·줄바꿈 허용(CLOVA가 단어마다 줄을 바꿔 주므로),
+# 로/길+번호 또는 동/읍/면/리+번지에서 끝. 한글·숫자·공백만 허용해 문서 전체를 가로지르지 않게 함.
+_ADDRESS_RE = re.compile(
+    r"(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)"
+    r"[가-힣0-9\s]{0,50}?"
+    r"(?:(?:로|길)\s*\d+(?:-\d+)?|[가-힣]+(?:동|읍|면|리)\s*\d+(?:-\d+)?)"
+)
+
+
 def _extract_address(text: str) -> Optional[str]:
-    patterns = [
-        r"(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)"
-        r"[^\n]{2,40}(로|길)\s*\d+[^\n]{0,20}",
-        r"(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)"
-        r"[^\n]{2,40}(동|읍|면)\s*\d+[-\d]*",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group().strip()
-
-    return None
+    match = _ADDRESS_RE.search(text)
+    if not match:
+        return None
+    # 매칭된 주소의 줄바꿈·중복 공백만 한 칸으로 정리(입력 원문은 그대로 둠)
+    return " ".join(match.group().split())

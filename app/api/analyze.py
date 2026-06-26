@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, File, UploadFile
 
 from app.core.exceptions import AppException
@@ -142,21 +144,78 @@ def _parse_ratio(ratio_str: str | None) -> float:
         return 0.0
 
 
+# ── 전세금 추출 ────────────────────────────────────────────────
+
+_KO_NUM = {"영": 0, "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5,
+           "육": 6, "칠": 7, "팔": 8, "구": 9}
+_UNIT_SMALL = {"십": 10, "백": 100, "천": 1000}
+_UNIT_BIG = {"만": 10_000, "억": 100_000_000}
+
+# 콤마/평문 숫자 + 원   (예: "250,000,000원")
+_RE_DIGIT_AMOUNT = re.compile(r"(\d[\d,]{5,})\s*원")
+# 숫자·한글 혼합 + 단위 + 원 (내부 공백 허용: "2억 5천만원", "이억오천만원")
+_AMT_CHARS = r"\d일이삼사오육칠팔구십백천만억"
+_RE_UNIT_AMOUNT = re.compile(rf"([{_AMT_CHARS}]+(?:[ \t]+[{_AMT_CHARS}]+)*)\s*원")
+
+
+def _parse_mixed_amount(s: str) -> int:
+    """'2억5천만' / '이억오천만' / '5000만' → 정수 환산"""
+    total = section = num = 0
+    digit_buf = ""
+    for ch in s:
+        if ch.isdigit():
+            digit_buf += ch
+            continue
+        if digit_buf:
+            num = int(digit_buf)
+            digit_buf = ""
+        if ch in _KO_NUM:
+            num = _KO_NUM[ch]
+        elif ch in _UNIT_SMALL:
+            section += (num or 1) * _UNIT_SMALL[ch]
+            num = 0
+        elif ch in _UNIT_BIG:
+            section += num
+            total += section * _UNIT_BIG[ch]
+            section = num = 0
+    if digit_buf:
+        num = int(digit_buf)
+    return total + section + num
+
+
+def _find_amount_candidates(text: str) -> list[tuple[int, int]]:
+    """(위치, 금액) 후보 목록. 콤마 숫자 + 단위 표기 모두 수집 (100만원 이상)."""
+    candidates: list[tuple[int, int]] = []
+
+    for m in _RE_DIGIT_AMOUNT.finditer(text):
+        value = int(m.group(1).replace(",", ""))
+        if value >= 1_000_000:
+            candidates.append((m.start(), value))
+
+    for m in _RE_UNIT_AMOUNT.finditer(text):
+        raw = m.group(1)
+        if not any(u in raw for u in "억만천"):  # 단위 없으면 콤마 패턴이 처리하므로 스킵
+            continue
+        value = _parse_mixed_amount(raw)
+        if value >= 1_000_000:
+            candidates.append((m.start(), value))
+
+    return candidates
+
+
 def _extract_jeonse_amount(text: str) -> int:
     """
-    텍스트에서 전세금 추출
-    예: "보증금 2억 5천만원" → 250_000_000
+    OCR 텍스트에서 전세보증금 추출.
+    표기 지원: 콤마 숫자(250,000,000원) / 숫자+단위(2억5천만원) / 한글(이억오천만원).
+    '보증금'·'전세' 키워드 근처 금액을 우선 채택, 없으면 최댓값.
     """
-    import re
+    candidates = _find_amount_candidates(text)
+    if not candidates:
+        return 0
 
-    match = re.search(r"(\d+)\s*억\s*(\d+)?\s*천?\s*만?", text)
-    if match:
-        uk = int(match.group(1))
-        chun = int(match.group(2)) if match.group(2) else 0
-        return uk * 100_000_000 + chun * 10_000_000
+    for pos, amount in candidates:
+        context = text[max(0, pos - 20):pos]
+        if "보증금" in context or "전세" in context:
+            return amount
 
-    match = re.search(r"(\d+)\s*만\s*원", text)
-    if match:
-        return int(match.group(1)) * 10_000
-
-    return 0
+    return max(amount for _, amount in candidates)
