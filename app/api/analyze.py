@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from fastapi import APIRouter, File, UploadFile
@@ -29,30 +30,42 @@ from app.services import masking_service, ocr_service, risk_service
 router = APIRouter()
 
 
-@router.post("/analyze/image", response_model=ImageResponse)
-async def analyze_image(file: UploadFile = File(...)):
-    """
-    1단계: 계약서 이미지 분석
-    - CLOVA OCR 텍스트 추출
-    - 개인정보 비식별화
-    - Redis 세션 생성
-    """
-    image_bytes = await file.read()
+MAX_PAGES = 10
 
-    # 1. OCR 실행
-    ocr_result = await ocr_service.run_ocr(image_bytes)
-    ocr_text = ocr_result["text"]
-    raw_address = ocr_result["address"]
+
+@router.post("/analyze/image", response_model=ImageResponse)
+async def analyze_image(file: list[UploadFile] = File(...)):
+    """
+    1단계: 계약서 이미지 분석 (여러 장 지원)
+    - 페이지별 CLOVA OCR 텍스트 추출
+    - 페이지별 개인정보 비식별화 (매핑 테이블은 문서 전체 공유)
+    - Redis 세션 생성
+
+    같은 필드명(file)으로 여러 장을 보내면 페이지 순서대로 처리한다. 1장이면 기존과 동일.
+    """
+    if not file:
+        raise AppException(400, "INVALID_IMAGE", "이미지가 없습니다.")
+    if len(file) > MAX_PAGES:
+        raise AppException(400, "TOO_MANY_PAGES", f"한 번에 최대 {MAX_PAGES}장까지 분석할 수 있습니다.")
+
+    # 1. 페이지별 OCR (병렬)
+    page_bytes = [await f.read() for f in file]
+    ocr_results = await asyncio.gather(*(ocr_service.run_ocr(b) for b in page_bytes))
+
+    page_texts = [r["text"] for r in ocr_results]
+    ocr_text = "\n".join(page_texts)
+    # 주소는 먼저 잡힌 페이지 것을 사용 (보통 1페이지 상단의 소재지)
+    raw_address = next((r["address"] for r in ocr_results if r.get("address")), None)
 
     if not ocr_text.strip():
         raise AppException(422, "OCR_FAILED", "텍스트를 추출할 수 없습니다.")
 
-    # 2. 비식별화 (팀원2 - masking_service)
-    masking_result = masking_service.run_masking(ocr_text)
+    # 2. 비식별화 (팀원2 - masking_service). 페이지별 마스킹 + 매핑 공유
+    masking_result = masking_service.run_masking_pages(page_texts)
     masked_text = masking_result["masked_text"]
     mapping = masking_result["mapping"]
 
-    # 3. 전세금 추출
+    # 3. 전세금 추출 (전체 텍스트 기준)
     jeonse_amount = _extract_jeonse_amount(ocr_text)
 
     # 4. 세션 생성 및 Redis 저장

@@ -18,9 +18,53 @@ def _get_ner():
     return pipeline("ner", model=NER_MODEL, aggregation_strategy="simple")
 
 
+# 여러 페이지를 이을 때 쓰는 구분선. GPT가 페이지 경계를 인지하도록 표기하되,
+# 금액·주소 추출 정규식에는 걸리지 않는 형태로 둔다.
+PAGE_SEPARATOR = "\n\n===== 페이지 {n} =====\n\n"
+
+
 def run_masking(text: str) -> dict:
     """
-    다층 비식별화 파이프라인. 확실한 정규식 → 라벨 → NER 순으로 통과시켜 누출을 최소화.
+    단일 페이지 비식별화. 내부적으로 페이지 1장짜리 run_masking_pages 와 동일.
+
+    Returns:
+        {"masked_text": "...", "mapping": {"[PERSON_001]": "홍길동", ...}}
+    """
+    return run_masking_pages([text])
+
+
+def run_masking_pages(page_texts: list[str]) -> dict:
+    """
+    여러 페이지를 하나의 매핑 테이블을 공유하며 비식별화한다.
+
+    페이지마다 마스킹을 따로 돌리는 이유:
+      - KLUE-NER 입력 길이 제한(약 512토큰) — 여러 장을 이어붙여 한 번에 넣으면 뒷부분이 잘려 누출.
+      - 페이지별로 처리하면 각 장이 온전히 NER을 통과한다.
+    counters/mapping 은 공유하므로 토큰 번호([PERSON_001], [PERSON_002]…)가 문서 전체에서 연속된다.
+
+    Returns:
+        {"masked_text": "<페이지들을 구분선으로 연결>", "mapping": {...}}
+    """
+    mapping: dict = {}
+    counters: dict = {}
+
+    masked_pages = [_mask_text(t, mapping, counters) for t in page_texts]
+
+    if len(masked_pages) == 1:
+        masked_text = masked_pages[0]
+    else:
+        parts = [masked_pages[0]]
+        for i, page in enumerate(masked_pages[1:], start=2):
+            parts.append(PAGE_SEPARATOR.format(n=i))
+            parts.append(page)
+        masked_text = "".join(parts)
+
+    return {"masked_text": masked_text, "mapping": mapping}
+
+
+def _mask_text(text: str, mapping: dict, counters: dict) -> str:
+    """
+    다층 비식별화 파이프라인(1개 페이지). 확실한 정규식 → 라벨 → NER 순으로 통과시켜 누출을 최소화.
     (단계가 쌓일수록 커버리지↑. 단, 어떤 PII 시스템도 100%는 불가 — OCR 오타·비표준 양식은 놓칠 수 있음)
 
     순서:
@@ -29,12 +73,9 @@ def run_masking(text: str) -> dict:
       3) 라벨 기반 인명 ('성명: 홍길동', '임대인(홍길동)')
       4) KLUE-NER — 위 단계가 놓친 자유 텍스트의 인명·장소·기관
 
-    Returns:
-        {"masked_text": "...", "mapping": {"[PERSON_001]": "홍길동", ...}}
+    mapping·counters 를 호출자와 공유해 여러 페이지에 걸쳐 토큰 번호를 연속시킨다.
     """
     masked_text = text
-    mapping: dict = {}
-    counters: dict = {}
 
     # 1) 구조적 정규식 (가장 확실). 구분자(-/./공백) 유무·법인명 변형까지 폭넓게 처리
     for pattern, prefix in (
@@ -70,7 +111,7 @@ def run_masking(text: str) -> dict:
     except Exception:
         pass
 
-    return {"masked_text": masked_text, "mapping": mapping}
+    return masked_text
 
 
 # 시/도로 시작하는 도로명·지번 주소 (NER 보강). 로/길 + 번호 또는 동/읍/면/리 + 번지.
