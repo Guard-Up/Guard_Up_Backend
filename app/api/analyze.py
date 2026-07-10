@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from fastapi import APIRouter, File, UploadFile
@@ -29,30 +30,45 @@ from app.services import masking_service, ocr_service, risk_service
 router = APIRouter()
 
 
-@router.post("/analyze/image", response_model=ImageResponse)
-async def analyze_image(file: UploadFile = File(...)):
-    """
-    1단계: 계약서 이미지 분석
-    - CLOVA OCR 텍스트 추출
-    - 개인정보 비식별화
-    - Redis 세션 생성
-    """
-    image_bytes = await file.read()
+MAX_PAGES = 10
 
-    # 1. OCR 실행
-    ocr_result = await ocr_service.run_ocr(image_bytes)
-    ocr_text = ocr_result["text"]
-    raw_address = ocr_result["address"]
+
+@router.post("/analyze/image", response_model=ImageResponse)
+async def analyze_image(file: list[UploadFile] = File(...)):
+    """
+    1단계: 계약서 이미지 분석 (여러 장 지원)
+    - 페이지별 CLOVA OCR 텍스트 추출
+    - 페이지별 개인정보 비식별화 (매핑 테이블은 문서 전체 공유)
+    - Redis 세션 생성
+
+    같은 필드명(file)으로 여러 장을 보내면 페이지 순서대로 처리한다. 1장이면 기존과 동일.
+    """
+    if not file:
+        raise AppException(400, "INVALID_IMAGE", "이미지가 없습니다.")
+    if len(file) > MAX_PAGES:
+        raise AppException(400, "TOO_MANY_PAGES", f"한 번에 최대 {MAX_PAGES}장까지 분석할 수 있습니다.")
+
+    # 1. 페이지별 OCR (병렬)
+    page_bytes = [await f.read() for f in file]
+    ocr_results = await asyncio.gather(*(ocr_service.run_ocr(b) for b in page_bytes))
+
+    page_texts = [r["text"] for r in ocr_results]
+    ocr_text = "\n".join(page_texts)
+    # 주소는 먼저 잡힌 페이지 것을 사용 (보통 1페이지 상단의 소재지)
+    raw_address = next((r["address"] for r in ocr_results if r.get("address")), None)
 
     if not ocr_text.strip():
         raise AppException(422, "OCR_FAILED", "텍스트를 추출할 수 없습니다.")
 
-    # 2. 비식별화 (팀원2 - masking_service)
-    masking_result = masking_service.run_masking(ocr_text)
+    # 1-1. 입력 검증 — 전세계약서 한 건인지 확인 (비전세·월세·여러 건 차단)
+    _validate_jeonse_contract(ocr_text)
+
+    # 2. 비식별화 (팀원2 - masking_service). 페이지별 마스킹 + 매핑 공유
+    masking_result = masking_service.run_masking_pages(page_texts)
     masked_text = masking_result["masked_text"]
     mapping = masking_result["mapping"]
 
-    # 3. 전세금 추출
+    # 3. 전세금 추출 (전체 텍스트 기준)
     jeonse_amount = _extract_jeonse_amount(ocr_text)
 
     # 4. 세션 생성 및 Redis 저장
@@ -142,6 +158,57 @@ def _parse_ratio(ratio_str: str | None) -> float:
         return float(ratio_str.replace("%", "").strip())
     except ValueError:
         return 0.0
+
+
+# ── 전세계약서 입력 검증 ──────────────────────────────────────
+# 여러 장을 받게 되면서, 전세계약서가 아니거나(월세·비계약서) 서로 다른 계약서를
+# 한꺼번에 넣는 입력을 걸러야 한다. OCR 텍스트만으로 판별하는 가벼운 규칙 검증.
+
+_LEASE_KEYWORDS = ("임대차", "전세", "보증금")
+
+# 계약서 한 건당 '제1조'는 한 번. 두 번 이상이면 여러 계약서를 함께 넣은 것.
+_ARTICLE1_RE = re.compile(r"제\s*1\s*조")
+
+# 체크박스: 대괄호 안에 공백이 아닌 표식(V·√·✓·■ 등)이 있으면 '선택됨'
+_CHECKED = r"\[\s*[^\s\]]{1,2}\s*\]"
+_WOLSE_CHECKED_RE = re.compile(_CHECKED + r"\s*(?:보증금\s*있는\s*)?월세")
+_JEONSE_CHECKED_RE = re.compile(_CHECKED + r"\s*전세")
+# 차임(월세) 값이 '없음'이 아니라 실제 금액이면 월세/반전세
+_CHARIM_RE = re.compile(r"차임\s*(?:\(\s*월\s*세\s*\))?\s*[:：]?\s*([^\n]{0,20})")
+
+
+def _is_wolse(text: str) -> bool:
+    """월세(반전세 포함) 여부. 이 앱은 전세만 받으므로 월세면 차단한다."""
+    # 표준계약서 상단 체크박스: 월세만 선택되고 전세는 미선택
+    if _WOLSE_CHECKED_RE.search(text) and not _JEONSE_CHECKED_RE.search(text):
+        return True
+    # 차임 항목에 실제 금액이 적혀 있으면 월세
+    m = _CHARIM_RE.search(text)
+    if m and "없음" not in m.group(1) and re.search(r"[\d만억천]|원", m.group(1)):
+        return True
+    return False
+
+
+def _validate_jeonse_contract(text: str) -> None:
+    """전세계약서 한 건인지 검증. 아니면 AppException(422)."""
+    # 계약서 자체로 인식되지 않음
+    if not any(k in text for k in _LEASE_KEYWORDS):
+        raise AppException(
+            422, "NOT_CONTRACT",
+            "전세계약서로 인식되지 않습니다. 계약서 전체가 선명하게 보이도록 다시 촬영해 주세요.",
+        )
+    # 여러 건의 계약서가 함께 들어옴
+    if len(_ARTICLE1_RE.findall(text)) >= 2:
+        raise AppException(
+            422, "MULTIPLE_CONTRACTS",
+            "여러 건의 계약서가 감지되었습니다. 한 번에 한 계약서만 넣어 주세요.",
+        )
+    # 월세 계약서 (이 앱은 전세 전용)
+    if _is_wolse(text):
+        raise AppException(
+            422, "NOT_JEONSE",
+            "월세 계약서로 보입니다. 이 앱은 전세 계약서만 분석합니다.",
+        )
 
 
 # ── 전세금 추출 ────────────────────────────────────────────────
