@@ -1,0 +1,20 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    # 포트를 호스트에 노출하지 않음 → 외부 접근 불가, app만 내부망으로 접근
+
+  app:
+    build: .
+    restart: always
+    env_file: .env
+    ports:
+      - "80:8000"          # 바깥 80 → 컨테이너 8000
+    depends_on:
+      - redis
+    volumes:
+      - ./db_store:/app/db_store                 # RAG 벡터 보존 (재시작해도 유지)
+      - hf_cache:/root/.cache/huggingface        # 임베딩·NER 모델 캐시 보존 (재다운로드 방지)
+
+volumes:
+  hf_cache:
