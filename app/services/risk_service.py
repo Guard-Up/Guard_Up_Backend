@@ -93,6 +93,11 @@ def calculate_risk(
     Returns:
         score, level, issues, action_guide 포함 dict
     """
+    # 실거래가 매칭 실패 등으로 전세가율이 None이면 0.0으로 간주
+    # (None >= threshold 비교 시 TypeError 방지)
+    if jeonse_ratio_pct is None:
+        jeonse_ratio_pct = 0.0
+
     rag_clauses = search_relevant_clauses(masked_text, n_results=5)
     gpt_issues = _analyze_with_gpt(masked_text, rag_clauses)
     public_issues = _build_public_data_issues(
