@@ -186,8 +186,8 @@ session:{uuid} = {
 | issues[].reason | string | 필수 | 위험 이유 설명 |
 | issues[].severity | number | 필수 | 심각도 (1~5) |
 | issues[].is_legal_basis | boolean | 필수 | **법적 위반 여부**. true=강행규정 위반(동의해도 무효) / false=개인 체크 권장 |
-| issues[].location | string \| null | 선택 | 🆕 계약서상 위치. "제9조(계약의 종료)" / "특약사항 1항". 전세가율·미등기 항목은 null |
-| issues[].page | number \| null | 선택 | 🆕 몇 번째 이미지인지 (1부터). 전세가율·미등기 항목은 null |
+| issues[].location | string \| null | 선택 | 🆕 계약서상 위치. "제9조(계약의 종료)" / "특약사항 1항". 전세가율 항목은 보증금이 적힌 "제1조(보증금과 차임 및 관리비) 보증금", 미등기 항목은 null |
+| issues[].page | number \| null | 선택 | 🆕 몇 번째 이미지인지 (1부터). 전세가율 항목은 제1조가 있는 페이지, 미등기 항목은 null |
 | issues[].legal_basis | string \| null | 선택 | 🆕 근거 법령·조문. "주택임대차보호법 제3조". 특정할 수 없으면 null |
 | action_guide | array | 필수 | 사용자 권고 액션 목록 (아래 상세) |
 | public_data | object | 필수 | 공공 데이터 요약 |

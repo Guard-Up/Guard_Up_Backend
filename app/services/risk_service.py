@@ -42,7 +42,7 @@ _SYSTEM_PROMPT = """당신은 한국 전세계약서 전문 법률 분석가입�
 [
   {
     "clause": "문제 조항의 원문을 그대로 발췌 (요약·의역 금지, [PERSON_001] 같은 토큰도 그대로, 60자 이내로 핵심 문장만)",
-    "reason": "위험 이유 (100자 이내)",
+    "reason": "왜 문제인지 구체적으로 (150자 이내). 이 조항 때문에 임차인이 실제로 어떤 불이익을 받는지, 법적으로 무효인지 유효한지를 포함",
     "severity": 5,
     "is_legal_basis": true,
     "location": "계약서상 위치. 예: '특약사항 1항', '제9조(계약의 종료)'. 알 수 없으면 null",
@@ -87,6 +87,8 @@ def calculate_risk(
     is_registered: bool,
     # mortgage_ratio_pct: float = 0.0,    # TODO: 등기부등본 API 연동 시 복구
     bjd_code: Optional[str] = None,
+    jeonse_amount: Optional[int] = None,
+    sale_price_manwon: Optional[int] = None,
 ) -> dict:
     """
     리스크 점수 계산
@@ -97,6 +99,8 @@ def calculate_risk(
         is_registered: 건물 등기 여부
         mortgage_ratio_pct: 근저당액/매매가 비율 (예: 25.0)
         bjd_code: 법정동 코드 (기관 추천용)
+        jeonse_amount: 계약서 보증금 (원). 전세가율 항목 설명에 금액을 넣는 데만 쓴다
+        sale_price_manwon: 실거래 매매가 (만원). 위와 같음
 
     Returns:
         score, level, issues, action_guide 포함 dict
@@ -110,6 +114,9 @@ def calculate_risk(
     gpt_issues = _analyze_with_gpt(masked_text, rag_clauses)
     public_issues = _build_public_data_issues(
         jeonse_ratio_pct, is_registered, # mortgage_ratio_pct   # TODO: 등기부등본 API 연동 시 복구
+        pages=_split_pages(masked_text),
+        jeonse_amount=jeonse_amount,
+        sale_price_manwon=sale_price_manwon,
     )
 
     score = _calculate_score(
@@ -167,34 +174,41 @@ def _score_to_level(score: int, is_registered: bool, jeonse_ratio_pct: float = 0
     return "danger"
 
 
+_JEONSE_RISK_TEXT = [
+    (90, 5, "90% 이상이면 집이 경매로 넘어갈 때 보증금을 온전히 돌려받기 어려운 깡통전세 위험이 매우 높습니다."),
+    (80, 4, "80% 이상이면 집값이 조금만 떨어져도 보증금을 다 돌려받지 못할 수 있습니다."),
+    (70, 3, "70% 이상이라 집값이 떨어지면 보증금 회수에 주의가 필요합니다."),
+]
+
+
 def _build_public_data_issues(
     jeonse_ratio_pct: float,
     is_registered: bool,
+    pages: Optional[list[str]] = None,
+    jeonse_amount: Optional[int] = None,
+    sale_price_manwon: Optional[int] = None,
 ) -> list[dict]:
     """공공데이터 기반 위험요소를 issue 형태로 변환"""
     issues: list[dict] = []
 
-    if jeonse_ratio_pct >= 90:
-        issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 90% 이상으로 깡통전세 위험이 매우 높습니다.",
-            "severity": 5,
-            "is_legal_basis": True,
-        })
-    elif jeonse_ratio_pct >= 80:
-        issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 80% 이상으로 깡통전세 가능성이 있습니다.",
-            "severity": 4,
-            "is_legal_basis": True,
-        })
-    elif jeonse_ratio_pct >= 70:
-        issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 70% 이상으로 주의가 필요합니다.",
-            "severity": 3,
-            "is_legal_basis": True,
-        })
+    for threshold, severity, risk_text in _JEONSE_RISK_TEXT:
+        if jeonse_ratio_pct >= threshold:
+            if jeonse_amount and sale_price_manwon:
+                reason = (f"보증금 {_fmt_won(jeonse_amount)}이 최근 실거래 매매가 "
+                          f"{_fmt_won(sale_price_manwon * 10_000)}의 {jeonse_ratio_pct:.1f}%입니다. {risk_text}")
+            else:
+                reason = f"매매가 대비 전세금 비율이 {risk_text}"
+            # 원인은 계약서 제1조의 보증금 줄이므로 그 위치를 가리킨다
+            page, location = _article_location(pages or [], 1)
+            issues.append({
+                "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
+                "reason": reason,
+                "severity": severity,
+                "is_legal_basis": True,
+                "location": f"{location} 보증금" if location else None,
+                "page": page,
+            })
+            break
 
     if not is_registered:
         issues.append({
@@ -314,6 +328,22 @@ def _heading_before(compact: str, pos: int, page: str) -> Optional[str]:
         title = " ".join(m.group(1).split()) if m else article.group(2)
         return f"제{num}조({title})" if title else f"제{num}조"
     return None
+
+
+def _article_location(pages: list[str], num: int) -> tuple[Optional[int], Optional[str]]:
+    """'제N조(제목)'이 있는 페이지와 표기를 찾는다."""
+    for page_no, page in enumerate(pages, start=1):
+        m = re.search(rf"제\s*{num}\s*조\s*\(([^)]{{1,40}})\)", page)
+        if m:
+            return page_no, f"제{num}조({' '.join(m.group(1).split())})"
+    return None, None
+
+
+def _fmt_won(won: int) -> str:
+    """2_045_000_000 → '20억 4,500만원'"""
+    eok, man = divmod(won // 10_000, 10_000)
+    parts = ([f"{eok}억"] if eok else []) + ([f"{man:,}만"] if man else [])
+    return " ".join(parts) + "원" if parts else f"{won:,}원"
 
 
 def _clean_str(value) -> Optional[str]:

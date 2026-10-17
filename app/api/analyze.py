@@ -131,6 +131,8 @@ async def analyze_risk(req: RiskRequest):
         is_registered=is_registered,
         # mortgage_ratio_pct=mortgage_ratio_pct,    # TODO: 등기부등본 API 연동 시 복구
         bjd_code=bjd_code,
+        jeonse_amount=session.get(KEY_JEONSE_AMOUNT),
+        sale_price_manwon=sale_price or None,
     )
 
     # 분석 완료 후 개인정보 매핑 테이블 파기
