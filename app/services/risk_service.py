@@ -139,9 +139,6 @@ def _calculate_score(
             deduction += pts
             break
 
-    if not is_registered:
-        deduction += 30
-
     for issue in issues:
         deduction += _SEVERITY_DEDUCTIONS.get(issue.get("severity", 0), 0)
 
