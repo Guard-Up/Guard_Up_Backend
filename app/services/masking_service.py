@@ -49,6 +49,8 @@ def run_masking_pages(page_texts: list[str]) -> dict:
     counters: dict = {}
 
     masked_pages = [_mask_text(t, mapping, counters) for t in page_texts]
+    # 모든 페이지를 본 뒤에 한 번 더 — 2페이지에서 처음 잡힌 이름도 1페이지에서 가려진다
+    masked_pages = [_propagate_names(p, mapping) for p in masked_pages]
 
     if len(masked_pages) == 1:
         masked_text = masked_pages[0]
@@ -134,10 +136,17 @@ _NAME_LABEL_PATTERNS = [
 ]
 
 
+# 표 양식은 OCR이 '성명 / 주소 / 전화 / 김철수'처럼 라벨 칸을 먼저 읽기 때문에
+# 라벨 뒤 첫 단어가 이름이 아니라 다른 라벨일 수 있다. 이런 단어는 이름으로 보지 않는다.
+_NOT_NAMES = {"주소", "전화", "주민", "주민등록", "성명", "연락처", "날인", "서명", "도장", "생년월일"}
+
+
 def _mask_label_names(text: str, mapping: dict, counters: dict) -> str:
     """라벨 뒤 인명만 마스킹(라벨 자체는 보존). 이미 [PERSON_xxx]로 치환된 곳은 한글이 아니라 매칭 안 됨."""
     def repl(match: "re.Match") -> str:
         name = match.group(1)
+        if name in _NOT_NAMES:
+            return match.group(0)
         counters["PERSON"] = counters.get("PERSON", 0) + 1
         token = f"[PERSON_{counters['PERSON']:03d}]"
         mapping[token] = name
@@ -145,6 +154,22 @@ def _mask_label_names(text: str, mapping: dict, counters: dict) -> str:
 
     for pattern in _NAME_LABEL_PATTERNS:
         text = re.sub(pattern, repl, text)
+    return text
+
+
+def _propagate_names(text: str, mapping: dict) -> str:
+    """
+    한 곳에서라도 인명으로 확인된 값은 문서 전체에서 같은 토큰으로 가린다.
+    도장 표기('영수자 (홍길동 인)')나 표 칸 읽기 순서 때문에 라벨·NER이 놓친 자리를 막는다.
+    놓친 자리에는 그 이름의 첫 토큰을 쓴다. 이미 앞 단계에서 따로 가려진 자리는 번호가 다를 수 있다.
+    """
+    names: dict[str, str] = {}
+    for token, value in mapping.items():
+        if token.startswith("[PERSON_") and len(value) >= 2 and value not in _NOT_NAMES:
+            names.setdefault(value, token)
+    # 긴 이름부터 (예: '김철수'를 '철수'보다 먼저). 앞이 한글이면 다른 단어의 일부이므로 건너뜀
+    for name in sorted(names, key=len, reverse=True):
+        text = re.sub(rf"(?<![가-힣]){re.escape(name)}", names[name], text)
     return text
 
 
