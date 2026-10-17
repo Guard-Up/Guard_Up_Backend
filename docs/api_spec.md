@@ -180,19 +180,23 @@ session:{uuid} = {
 | 필드명 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
 | score | number | 필수 | 위험 점수 (0~100, 낮을수록 위험). **미등기 시 0점 고정** |
-| level | string | 필수 | "safe"(70~100) / "caution"(40~69) / "danger"(0~39) |
+| level | string | 필수 | "safe"(90~100) / "caution"(70~89) / "danger"(0~69). **미등기 또는 전세가율 90% 이상이면 점수와 무관하게 danger** |
 | issues | array | 필수 | 위험 조항 목록 |
-| issues[].clause | string | 필수 | 위험 조항 원문/요약 |
+| issues[].clause | string | 필수 | 위험 조항 원문 발췌 (마스킹 토큰 포함). 전세가율·미등기 항목은 "전세가율 83%"처럼 요약 |
 | issues[].reason | string | 필수 | 위험 이유 설명 |
 | issues[].severity | number | 필수 | 심각도 (1~5) |
-| issues[].is_legal_basis | boolean | 필수 | 🆕 **법적 위반 여부**. true=강행규정 위반(동의해도 무효) / false=개인 체크 권장 |
+| issues[].is_legal_basis | boolean | 필수 | **법적 위반 여부**. true=강행규정 위반(동의해도 무효) / false=개인 체크 권장 |
+| issues[].location | string \| null | 선택 | 🆕 계약서상 위치. "제9조(계약의 종료)" / "특약사항 1항". 전세가율·미등기 항목은 null |
+| issues[].page | number \| null | 선택 | 🆕 몇 번째 이미지인지 (1부터). 전세가율·미등기 항목은 null |
+| issues[].legal_basis | string \| null | 선택 | 🆕 근거 법령·조문. "주택임대차보호법 제3조". 특정할 수 없으면 null |
 | action_guide | array | 필수 | 사용자 권고 액션 목록 (아래 상세) |
 | public_data | object | 필수 | 공공 데이터 요약 |
 | public_data.jeonse_ratio | string | 필수 | 전세가율 (예: "83.0%", 없으면 "정보 없음") |
 | public_data.is_registered | boolean | 필수 | 등기 여부 |
 | mapping_table_purged | boolean | 필수 | 분석 후 개인정보 매핑 테이블 파기 여부 (항상 true) |
 
-> 🆕 **추가**: `issues[].is_legal_basis` — Flutter에서 true면 "법적 위반(빨강)", false면 "개인 확인 권장(노랑)" 등으로 구분 표시 권장.
+> 🆕 **추가**: `issues[].location` · `page` · `legal_basis` — 셋 다 null일 수 있으니 null이면 숨김 처리. `location`·`page`는 서버가 GPT 발췌문을 계약서 원문에서 직접 찾아 채우고, 원문에서 못 찾을 때만 GPT가 답한 값을 쓴다.
+> `issues[].is_legal_basis` — Flutter에서 true면 "법적 위반(빨강)", false면 "개인 확인 권장(노랑)" 등으로 구분 표시 권장.
 > 🔄 **변경**: `public_data.mortgage_amount`는 **현재 미제공** (등기부등본 API 미연동).
 
 ### action_guide 상세

@@ -14,6 +14,7 @@ from langchain_openai import ChatOpenAI
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.services.institution_service import get_by_bjd_code
+from app.services.masking_service import PAGE_SEPARATOR
 from app.services.rag_service import search_relevant_clauses
 
 # ── 감점 기준 ─────────────────────────────────────────────────
@@ -40,12 +41,19 @@ _SYSTEM_PROMPT = """당신은 한국 전세계약서 전문 법률 분석가입�
 출력 형식 (JSON 배열만 반환, 다른 텍스트 금지):
 [
   {
-    "clause": "문제 조항 원문 또는 요약 (50자 이내)",
-    "reason": "위험 이유 및 법적 근거 (100자 이내)",
+    "clause": "문제 조항의 원문을 그대로 발췌 (요약·의역 금지, [PERSON_001] 같은 토큰도 그대로, 60자 이내로 핵심 문장만)",
+    "reason": "위험 이유 (100자 이내)",
     "severity": 5,
-    "is_legal_basis": true
+    "is_legal_basis": true,
+    "location": "계약서상 위치. 예: '특약사항 1항', '제9조(계약의 종료)'. 알 수 없으면 null",
+    "page": 1,
+    "legal_basis": "근거 법령과 조문. 예: '주택임대차보호법 제3조'. 특정할 수 없으면 null"
   }
 ]
+
+위치 표기:
+- 계약서는 '===== 페이지 N =====' 표시로 페이지가 나뉜다. page에는 그 조항이 있는 페이지 번호를 넣는다.
+- 본문 조항은 '제N조(제목)', 특약은 '특약사항 N항'으로 쓴다.
 
 심각도(severity) 기준:
 5: 계약 즉시 중단 (전입신고 금지, 임의 해지 등 주택임대차보호법 강행규정 위반)
@@ -205,7 +213,10 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
         f"[{c['category']}] (is_legal_basis={c.get('is_legal_basis', False)}) {c['content']}"
         for c in rag_clauses
     )
-    user_message = f"참고 법률 조항:\n{rag_context}\n\n분석할 계약서:\n{masked_text}"
+    pages = _split_pages(masked_text)
+    # 1페이지에는 구분선이 없으므로 GPT가 페이지를 셀 수 있게 모든 페이지에 표시를 붙인다
+    labeled = "".join(PAGE_SEPARATOR.format(n=i) + p for i, p in enumerate(pages, start=1))
+    user_message = f"참고 법률 조항:\n{rag_context}\n\n분석할 계약서:{labeled}"
 
     try:
         llm = ChatOpenAI(
@@ -226,16 +237,98 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
     except Exception as e:
         raise AppException(502, "AI_MODULE_ERROR", f"AI 응답 파싱 실패: {e}")
 
-    return [
-        {
-            "clause": str(item.get("clause", "")),
+    issues = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        clause = str(item.get("clause", ""))
+        # 위치는 계약서 원문에서 직접 찾은 값을 우선한다. 못 찾을 때만 GPT 답을 쓴다.
+        found_page, found_location = _locate_clause(clause, pages)
+        issues.append({
+            "clause": clause,
             "reason": str(item.get("reason", "")),
             "severity": min(5, max(1, int(item.get("severity", 1)))),
             "is_legal_basis": bool(item.get("is_legal_basis", False)),
-        }
-        for item in raw
-        if isinstance(item, dict)
-    ]
+            "location": found_location or _clean_str(item.get("location")),
+            "page": found_page or _valid_page(item.get("page"), len(pages)),
+            "legal_basis": _clean_str(item.get("legal_basis")),
+        })
+    return issues
+
+
+# ── 조항 위치 찾기 ────────────────────────────────────────────
+
+_PAGE_SPLIT_RE = re.compile(r"\n\n===== 페이지 \d+ =====\n\n")
+_ARTICLE_RE = re.compile(r"제(\d+)조(?:\(([^)]{1,20})\))?")
+_SPECIAL_RE = re.compile(r"\[?특약사항\]?")
+# 공백을 지운 텍스트라 앞 문장의 마침표와 붙는다("있다.2.임대차…"). 앞이 숫자만 아니면 번호로 본다
+_SPECIAL_ITEM_RE = re.compile(r"(?<!\d)(\d{1,2})\.(?!\d)")
+
+
+def _split_pages(masked_text: str) -> list[str]:
+    return _PAGE_SPLIT_RE.split(masked_text)
+
+
+def _compact(text: str) -> str:
+    # CLOVA가 단어마다 줄을 바꾸므로 공백·줄바꿈을 모두 지우고 비교한다
+    return re.sub(r"\s+", "", text)
+
+
+def _locate_clause(clause: str, pages: list[str]) -> tuple[Optional[int], Optional[str]]:
+    """
+    GPT가 발췌한 조항을 계약서 원문(마스킹본)에서 찾아 (페이지, '제N조(제목)' 또는 '특약사항 N항')을 돌려준다.
+    원문에서 못 찾으면 (None, None). 단일 페이지 계약서는 페이지만이라도 1로 채운다.
+    """
+    needle = _compact(clause).strip("\"'“”‘’….")
+    # 발췌가 원문과 끝부분이 조금 달라도 찾을 수 있게 앞부분부터 점점 짧게 시도
+    for size in (len(needle), 30, 20, 12):
+        probe = needle[:size]
+        if len(probe) < 8:
+            break
+        for page_no, page in enumerate(pages, start=1):
+            compact = _compact(page)
+            pos = compact.find(probe)
+            if pos != -1:
+                return page_no, _heading_before(compact, pos, page)
+    return (1, None) if len(pages) == 1 else (None, None)
+
+
+def _heading_before(compact: str, pos: int, page: str) -> Optional[str]:
+    """원문 위치 pos 직전의 조 제목 또는 특약 번호를 찾는다."""
+    before = compact[:pos]
+    article = None
+    for m in _ARTICLE_RE.finditer(before):
+        article = m
+    special = None
+    for m in _SPECIAL_RE.finditer(before):
+        special = m
+
+    # 특약사항 표시가 마지막 조 제목보다 뒤에 있으면 특약 영역
+    if special and (article is None or special.start() > article.start()):
+        items = list(_SPECIAL_ITEM_RE.finditer(before, special.end()))
+        return f"특약사항 {items[-1].group(1)}항" if items else "특약사항"
+    if article:
+        num = article.group(1)
+        # 제목은 띄어쓰기가 남아 있는 원문에서 다시 읽는다 ("계약의종료" → "계약의 종료")
+        m = re.search(rf"제\s*{num}\s*조\s*\(([^)]{{1,40}})\)", page)
+        title = " ".join(m.group(1).split()) if m else article.group(2)
+        return f"제{num}조({title})" if title else f"제{num}조"
+    return None
+
+
+def _clean_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s and s.lower() not in ("null", "none") else None
+
+
+def _valid_page(value, n_pages: int) -> Optional[int]:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return None
+    return p if 1 <= p <= n_pages else None
 
 
 def _strip_code_fence(text: str) -> str:
