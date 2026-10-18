@@ -22,6 +22,9 @@ class Issue(BaseModel):
     reason: str
     severity: int  # 1~5
     is_legal_basis: bool  # true: 강행규정 위반(법적 무효), false: 임차인 동의 시 유효(개인 체크 권장)
+    location: Optional[str] = None  # 계약서상 위치. "제9조(계약의 종료)" / "특약사항 1항". 전세가율은 "제1조(…) 보증금", 미등기는 null
+    page: Optional[int] = None  # 몇 번째 이미지인지 (1부터). 미등기 항목은 null
+    legal_basis: Optional[str] = None  # 근거 법령·조문. "주택임대차보호법 제3조"
 
 
 class PublicData(BaseModel):

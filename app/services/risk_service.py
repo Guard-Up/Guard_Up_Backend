@@ -14,6 +14,7 @@ from langchain_openai import ChatOpenAI
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.services.institution_service import get_by_bjd_code
+from app.services.masking_service import PAGE_SEPARATOR
 from app.services.rag_service import search_relevant_clauses
 
 # ── 감점 기준 ─────────────────────────────────────────────────
@@ -36,16 +37,24 @@ _SEVERITY_DEDUCTIONS = {5: 25, 4: 15, 3: 10, 2: 5, 1: 2}
 
 _SYSTEM_PROMPT = """당신은 한국 전세계약서 전문 법률 분석가입니다.
 계약서 텍스트에서 임차인에게 불리한 독소 조항을 찾아 심각도와 법적 근거 여부를 평가하세요.
+반드시 함께 제공된 참고 법률 조항(법령·판례·표준계약서)에 근거하여 판단하고, legal_basis에는 그 근거 조문을 적으세요.
 
 출력 형식 (JSON 배열만 반환, 다른 텍스트 금지):
 [
   {
-    "clause": "문제 조항 원문 또는 요약 (50자 이내)",
-    "reason": "위험 이유 및 법적 근거 (100자 이내)",
+    "clause": "문제 조항의 원문을 그대로 발췌 (요약·의역 금지, [PERSON_001] 같은 토큰도 그대로, 60자 이내로 핵심 문장만)",
+    "reason": "왜 문제인지 구체적으로 (150자 이내). 이 조항 때문에 임차인이 실제로 어떤 불이익을 받는지, 법적으로 무효인지 유효한지를 포함",
     "severity": 5,
-    "is_legal_basis": true
+    "is_legal_basis": true,
+    "location": "계약서상 위치. 예: '특약사항 1항', '제9조(계약의 종료)'. 알 수 없으면 null",
+    "page": 1,
+    "legal_basis": "근거 법령과 조문. 예: '주택임대차보호법 제3조'. 특정할 수 없으면 null"
   }
 ]
+
+위치 표기:
+- 계약서는 '===== 페이지 N =====' 표시로 페이지가 나뉜다. page에는 그 조항이 있는 페이지 번호를 넣는다.
+- 본문 조항은 '제N조(제목)', 특약은 '특약사항 N항'으로 쓴다.
 
 심각도(severity) 기준:
 5: 계약 즉시 중단 (전입신고 금지, 임의 해지 등 주택임대차보호법 강행규정 위반)
@@ -79,6 +88,9 @@ def calculate_risk(
     is_registered: bool,
     # mortgage_ratio_pct: float = 0.0,    # TODO: 등기부등본 API 연동 시 복구
     bjd_code: Optional[str] = None,
+    jeonse_amount: Optional[int] = None,
+    sale_price_manwon: Optional[int] = None,
+    jeonse_ratio_known: bool = True,
 ) -> dict:
     """
     리스크 점수 계산
@@ -89,14 +101,26 @@ def calculate_risk(
         is_registered: 건물 등기 여부
         mortgage_ratio_pct: 근저당액/매매가 비율 (예: 25.0)
         bjd_code: 법정동 코드 (기관 추천용)
+        jeonse_amount: 계약서 보증금 (원). 전세가율 항목 설명에 금액을 넣는 데만 쓴다
+        sale_price_manwon: 실거래 매매가 (만원). 위와 같음
+        jeonse_ratio_known: 전세가율을 실제로 계산했는지. False면 '확인 불가' 안내 항목을 붙인다
 
     Returns:
         score, level, issues, action_guide 포함 dict
     """
+    # 실거래가 매칭 실패 등으로 전세가율이 None이면 0.0으로 간주
+    # (None >= threshold 비교 시 TypeError 방지)
+    if jeonse_ratio_pct is None:
+        jeonse_ratio_pct = 0.0
+
     rag_clauses = search_relevant_clauses(masked_text, n_results=5)
     gpt_issues = _analyze_with_gpt(masked_text, rag_clauses)
     public_issues = _build_public_data_issues(
         jeonse_ratio_pct, is_registered, # mortgage_ratio_pct   # TODO: 등기부등본 API 연동 시 복구
+        pages=_split_pages(masked_text),
+        jeonse_amount=jeonse_amount,
+        sale_price_manwon=sale_price_manwon,
+        jeonse_ratio_known=jeonse_ratio_known,
     )
 
     score = _calculate_score(
@@ -106,7 +130,7 @@ def calculate_risk(
         gpt_issues
     )
     level = _score_to_level(score, is_registered, jeonse_ratio_pct)
-    action_guide = _build_action_guide(level, bjd_code)
+    action_guide = _build_action_guide(level, bjd_code, gpt_issues)
 
     return {
         "score": score,
@@ -134,9 +158,6 @@ def _calculate_score(
             deduction += pts
             break
 
-    if not is_registered:
-        deduction += 30
-
     for issue in issues:
         deduction += _SEVERITY_DEDUCTIONS.get(issue.get("severity", 0), 0)
 
@@ -157,39 +178,63 @@ def _score_to_level(score: int, is_registered: bool, jeonse_ratio_pct: float = 0
     return "danger"
 
 
+_JEONSE_RISK_TEXT = [
+    (90, 5, "90% 이상이면 집이 경매로 넘어갈 때 보증금을 온전히 돌려받기 어려운 깡통전세 위험이 매우 높습니다."),
+    (80, 4, "80% 이상이면 집값이 조금만 떨어져도 보증금을 다 돌려받지 못할 수 있습니다."),
+    (70, 3, "70% 이상이라 집값이 떨어지면 보증금 회수에 주의가 필요합니다."),
+]
+
+
 def _build_public_data_issues(
     jeonse_ratio_pct: float,
     is_registered: bool,
+    pages: Optional[list[str]] = None,
+    jeonse_amount: Optional[int] = None,
+    sale_price_manwon: Optional[int] = None,
+    jeonse_ratio_known: bool = True,
 ) -> list[dict]:
     """공공데이터 기반 위험요소를 issue 형태로 변환"""
     issues: list[dict] = []
+    page, location = _article_location(pages or [], 1)
+    deposit_location = f"{location} 보증금" if location else None
 
-    if jeonse_ratio_pct >= 90:
+    # 실거래가를 못 찾았으면 추정값을 쓰지 않고 '확인 불가'로 알린다 (점수에는 반영하지 않음).
+    # 미등기면 그 자체로 위험 판정이라 따로 알리지 않는다.
+    if not jeonse_ratio_known and is_registered:
         issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 90% 이상으로 깡통전세 위험이 매우 높습니다.",
-            "severity": 5,
-            "is_legal_basis": True,
+            "clause": "전세가율 확인 불가",
+            "reason": "최근 12개월 실거래가에서 이 건물의 매매 거래를 찾지 못해 전세가율을 계산하지 못했습니다. "
+                      "인근 시세나 공시가격과 비교해 보증금이 매매가의 70%를 넘지 않는지 직접 확인하세요.",
+            "severity": 2,
+            "is_legal_basis": False,
+            "location": deposit_location,
+            "page": page,
         })
-    elif jeonse_ratio_pct >= 80:
-        issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 80% 이상으로 깡통전세 가능성이 있습니다.",
-            "severity": 4,
-            "is_legal_basis": True,
-        })
-    elif jeonse_ratio_pct >= 70:
-        issues.append({
-            "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
-            "reason": "매매가 대비 전세금 비율이 70% 이상으로 주의가 필요합니다.",
-            "severity": 3,
-            "is_legal_basis": True,
-        })
+
+    for threshold, severity, risk_text in _JEONSE_RISK_TEXT:
+        if jeonse_ratio_pct >= threshold:
+            if jeonse_amount and sale_price_manwon:
+                reason = (f"보증금 {_fmt_won(jeonse_amount)}이 최근 실거래 매매가 "
+                          f"{_fmt_won(sale_price_manwon * 10_000)}의 {jeonse_ratio_pct:.1f}%입니다. {risk_text}")
+            else:
+                reason = f"매매가 대비 전세금 비율이 {risk_text}"
+            # 원인은 계약서 제1조의 보증금 줄이므로 그 위치를 가리킨다
+            issues.append({
+                "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
+                "reason": reason,
+                "severity": severity,
+                "is_legal_basis": True,
+                "location": deposit_location,
+                "page": page,
+            })
+            break
 
     if not is_registered:
+        # 건축물대장 표제부에는 소유권 정보가 없다. '등재 여부'만 말하고 소유권 확인을 주장하지 않는다
         issues.append({
             "clause": "건물 미등기",
-            "reason": "등기부등본이 없어 소유권 확인이 불가능합니다. 대항력·우선변제권 보호를 받을 수 없으므로 계약을 중단하세요.",
+            "reason": "건축물대장에 등재되지 않은 건물입니다. 적법한 건물인지와 소유자를 확인할 수 없고, "
+                      "전입신고를 해도 대항력·우선변제권을 지키기 어려울 수 있으므로 계약을 중단하세요.",
             "severity": 5,
             "is_legal_basis": True,
         })
@@ -203,7 +248,10 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
         f"[{c['category']}] (is_legal_basis={c.get('is_legal_basis', False)}) {c['content']}"
         for c in rag_clauses
     )
-    user_message = f"참고 법률 조항:\n{rag_context}\n\n분석할 계약서:\n{masked_text}"
+    pages = _split_pages(masked_text)
+    # 1페이지에는 구분선이 없으므로 GPT가 페이지를 셀 수 있게 모든 페이지에 표시를 붙인다
+    labeled = "".join(PAGE_SEPARATOR.format(n=i) + p for i, p in enumerate(pages, start=1))
+    user_message = f"참고 법률 조항:\n{rag_context}\n\n분석할 계약서:{labeled}"
 
     try:
         llm = ChatOpenAI(
@@ -224,16 +272,114 @@ def _analyze_with_gpt(masked_text: str, rag_clauses: list[dict]) -> list[dict]:
     except Exception as e:
         raise AppException(502, "AI_MODULE_ERROR", f"AI 응답 파싱 실패: {e}")
 
-    return [
-        {
-            "clause": str(item.get("clause", "")),
+    issues = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        clause = str(item.get("clause", ""))
+        # 위치는 계약서 원문에서 직접 찾은 값을 우선한다. 못 찾을 때만 GPT 답을 쓴다.
+        found_page, found_location = _locate_clause(clause, pages)
+        issues.append({
+            "clause": clause,
             "reason": str(item.get("reason", "")),
             "severity": min(5, max(1, int(item.get("severity", 1)))),
             "is_legal_basis": bool(item.get("is_legal_basis", False)),
-        }
-        for item in raw
-        if isinstance(item, dict)
-    ]
+            "location": found_location or _clean_str(item.get("location")),
+            "page": found_page or _valid_page(item.get("page"), len(pages)),
+            "legal_basis": _clean_str(item.get("legal_basis")),
+        })
+    return issues
+
+
+# ── 조항 위치 찾기 ────────────────────────────────────────────
+
+_PAGE_SPLIT_RE = re.compile(r"\n\n===== 페이지 \d+ =====\n\n")
+_ARTICLE_RE = re.compile(r"제(\d+)조(?:\(([^)]{1,20})\))?")
+_SPECIAL_RE = re.compile(r"\[?특약사항\]?")
+# 공백을 지운 텍스트라 앞 문장의 마침표와 붙는다("있다.2.임대차…"). 앞이 숫자만 아니면 번호로 본다
+_SPECIAL_ITEM_RE = re.compile(r"(?<!\d)(\d{1,2})\.(?!\d)")
+
+
+def _split_pages(masked_text: str) -> list[str]:
+    return _PAGE_SPLIT_RE.split(masked_text)
+
+
+def _compact(text: str) -> str:
+    # CLOVA가 단어마다 줄을 바꾸므로 공백·줄바꿈을 모두 지우고 비교한다
+    return re.sub(r"\s+", "", text)
+
+
+def _locate_clause(clause: str, pages: list[str]) -> tuple[Optional[int], Optional[str]]:
+    """
+    GPT가 발췌한 조항을 계약서 원문(마스킹본)에서 찾아 (페이지, '제N조(제목)' 또는 '특약사항 N항')을 돌려준다.
+    원문에서 못 찾으면 (None, None). 단일 페이지 계약서는 페이지만이라도 1로 채운다.
+    """
+    needle = _compact(clause).strip("\"'“”‘’….")
+    # 발췌가 원문과 끝부분이 조금 달라도 찾을 수 있게 앞부분부터 점점 짧게 시도
+    for size in (len(needle), 30, 20, 12):
+        probe = needle[:size]
+        if len(probe) < 8:
+            break
+        for page_no, page in enumerate(pages, start=1):
+            compact = _compact(page)
+            pos = compact.find(probe)
+            if pos != -1:
+                return page_no, _heading_before(compact, pos, page)
+    return (1, None) if len(pages) == 1 else (None, None)
+
+
+def _heading_before(compact: str, pos: int, page: str) -> Optional[str]:
+    """원문 위치 pos 직전의 조 제목 또는 특약 번호를 찾는다."""
+    before = compact[:pos]
+    article = None
+    for m in _ARTICLE_RE.finditer(before):
+        article = m
+    special = None
+    for m in _SPECIAL_RE.finditer(before):
+        special = m
+
+    # 특약사항 표시가 마지막 조 제목보다 뒤에 있으면 특약 영역
+    if special and (article is None or special.start() > article.start()):
+        items = list(_SPECIAL_ITEM_RE.finditer(before, special.end()))
+        return f"특약사항 {items[-1].group(1)}항" if items else "특약사항"
+    if article:
+        num = article.group(1)
+        # 제목은 띄어쓰기가 남아 있는 원문에서 다시 읽는다 ("계약의종료" → "계약의 종료")
+        m = re.search(rf"제\s*{num}\s*조\s*\(([^)]{{1,40}})\)", page)
+        title = " ".join(m.group(1).split()) if m else article.group(2)
+        return f"제{num}조({title})" if title else f"제{num}조"
+    return None
+
+
+def _article_location(pages: list[str], num: int) -> tuple[Optional[int], Optional[str]]:
+    """'제N조(제목)'이 있는 페이지와 표기를 찾는다."""
+    for page_no, page in enumerate(pages, start=1):
+        m = re.search(rf"제\s*{num}\s*조\s*\(([^)]{{1,40}})\)", page)
+        if m:
+            return page_no, f"제{num}조({' '.join(m.group(1).split())})"
+    return None, None
+
+
+def _fmt_won(won: int) -> str:
+    """2_045_000_000 → '20억 4,500만원'"""
+    eok, man = divmod(won // 10_000, 10_000)
+    parts = ([f"{eok}억"] if eok else []) + ([f"{man:,}만"] if man else [])
+    return " ".join(parts) + "원" if parts else f"{won:,}원"
+
+
+def _clean_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s and s.lower() not in ("null", "none") else None
+
+
+def _valid_page(value, n_pages: int) -> Optional[int]:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return None
+    return p if 1 <= p <= n_pages else None
 
 
 def _strip_code_fence(text: str) -> str:
@@ -245,7 +391,7 @@ def _strip_code_fence(text: str) -> str:
     return t.strip()
 
 
-def _build_action_guide(level: str, bjd_code: Optional[str]) -> list[dict]:
+def _build_action_guide(level: str, bjd_code: Optional[str], gpt_issues: Optional[list[dict]] = None) -> list[dict]:
     guide: list[dict] = []
 
     if level == "danger":
@@ -271,9 +417,23 @@ def _build_action_guide(level: str, bjd_code: Optional[str]) -> list[dict]:
                 "address": inst.get("address", ""),
             })
 
-    guide.append({
-        "type": "legal",
-        "message": "전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004",
-    })
+    guide.append({"type": "legal", "message": _legal_message(gpt_issues or [])})
 
     return guide
+
+
+_REPORT_CONTACT = "전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004"
+
+
+def _legal_message(gpt_issues: list[dict]) -> str:
+    """강행규정 위반 조항이 있으면 위치·근거 조문과 함께 '동의해도 무효'임을 알리고, 신고처를 덧붙인다."""
+    void = [i for i in gpt_issues if i.get("is_legal_basis")]
+    if not void:
+        return _REPORT_CONTACT
+    parts = []
+    for i in void:
+        where = i.get("location") or "해당 조항"
+        basis = f"({i['legal_basis']} 위반)" if i.get("legal_basis") else "(강행규정 위반)"
+        parts.append(f"{where}{basis}")
+    return (f"{', '.join(parts)}은 임차인에게 불리한 강행규정 위반이라 동의해도 무효입니다. "
+            f"서명 전에 임대인에게 해당 특약의 삭제를 요구하세요. {_REPORT_CONTACT}")
