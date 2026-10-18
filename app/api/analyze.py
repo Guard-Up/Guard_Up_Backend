@@ -10,8 +10,6 @@ from app.core.session import (
     KEY_JEONSE_AMOUNT,
     KEY_MAPPING,
     KEY_MASKED_TEXT,
-    KEY_OCR_TEXT,
-    KEY_RAW_ADDRESS,
     KEY_STEPS_COMPLETED,
     create_session,
     get_session,
@@ -72,14 +70,14 @@ async def analyze_image(file: list[UploadFile] = File(...)):
     jeonse_amount = _extract_jeonse_amount(ocr_text)
 
     # 4. 세션 생성 및 Redis 저장
+    # 마스킹 전 OCR 원문(주민번호·전화 포함)은 이후 단계에서 쓰지 않으므로 서버에 남기지 않는다.
+    # 개인정보는 매핑 테이블에만 있고, 그것도 4단계 직후 파기된다.
     session_id = new_session_id()
     await create_session(
         session_id,
         {
-            KEY_OCR_TEXT: ocr_text,
             KEY_MASKED_TEXT: masked_text,
             KEY_MAPPING: mapping,
-            KEY_RAW_ADDRESS: raw_address,
             KEY_JEONSE_AMOUNT: jeonse_amount,
             KEY_STEPS_COMPLETED: [1],
         },
@@ -133,6 +131,7 @@ async def analyze_risk(req: RiskRequest):
         bjd_code=bjd_code,
         jeonse_amount=session.get(KEY_JEONSE_AMOUNT),
         sale_price_manwon=sale_price or None,
+        jeonse_ratio_known=building.get("jeonse_ratio") is not None,
     )
 
     # 분석 완료 후 개인정보 매핑 테이블 파기
