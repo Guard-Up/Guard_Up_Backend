@@ -37,6 +37,7 @@ _SEVERITY_DEDUCTIONS = {5: 25, 4: 15, 3: 10, 2: 5, 1: 2}
 
 _SYSTEM_PROMPT = """당신은 한국 전세계약서 전문 법률 분석가입니다.
 계약서 텍스트에서 임차인에게 불리한 독소 조항을 찾아 심각도와 법적 근거 여부를 평가하세요.
+반드시 함께 제공된 참고 법률 조항(법령·판례·표준계약서)에 근거하여 판단하고, legal_basis에는 그 근거 조문을 적으세요.
 
 출력 형식 (JSON 배열만 반환, 다른 텍스트 금지):
 [
@@ -89,6 +90,7 @@ def calculate_risk(
     bjd_code: Optional[str] = None,
     jeonse_amount: Optional[int] = None,
     sale_price_manwon: Optional[int] = None,
+    jeonse_ratio_known: bool = True,
 ) -> dict:
     """
     리스크 점수 계산
@@ -101,6 +103,7 @@ def calculate_risk(
         bjd_code: 법정동 코드 (기관 추천용)
         jeonse_amount: 계약서 보증금 (원). 전세가율 항목 설명에 금액을 넣는 데만 쓴다
         sale_price_manwon: 실거래 매매가 (만원). 위와 같음
+        jeonse_ratio_known: 전세가율을 실제로 계산했는지. False면 '확인 불가' 안내 항목을 붙인다
 
     Returns:
         score, level, issues, action_guide 포함 dict
@@ -117,6 +120,7 @@ def calculate_risk(
         pages=_split_pages(masked_text),
         jeonse_amount=jeonse_amount,
         sale_price_manwon=sale_price_manwon,
+        jeonse_ratio_known=jeonse_ratio_known,
     )
 
     score = _calculate_score(
@@ -126,7 +130,7 @@ def calculate_risk(
         gpt_issues
     )
     level = _score_to_level(score, is_registered, jeonse_ratio_pct)
-    action_guide = _build_action_guide(level, bjd_code)
+    action_guide = _build_action_guide(level, bjd_code, gpt_issues)
 
     return {
         "score": score,
@@ -187,9 +191,25 @@ def _build_public_data_issues(
     pages: Optional[list[str]] = None,
     jeonse_amount: Optional[int] = None,
     sale_price_manwon: Optional[int] = None,
+    jeonse_ratio_known: bool = True,
 ) -> list[dict]:
     """공공데이터 기반 위험요소를 issue 형태로 변환"""
     issues: list[dict] = []
+    page, location = _article_location(pages or [], 1)
+    deposit_location = f"{location} 보증금" if location else None
+
+    # 실거래가를 못 찾았으면 추정값을 쓰지 않고 '확인 불가'로 알린다 (점수에는 반영하지 않음).
+    # 미등기면 그 자체로 위험 판정이라 따로 알리지 않는다.
+    if not jeonse_ratio_known and is_registered:
+        issues.append({
+            "clause": "전세가율 확인 불가",
+            "reason": "최근 12개월 실거래가에서 이 건물의 매매 거래를 찾지 못해 전세가율을 계산하지 못했습니다. "
+                      "인근 시세나 공시가격과 비교해 보증금이 매매가의 70%를 넘지 않는지 직접 확인하세요.",
+            "severity": 2,
+            "is_legal_basis": False,
+            "location": deposit_location,
+            "page": page,
+        })
 
     for threshold, severity, risk_text in _JEONSE_RISK_TEXT:
         if jeonse_ratio_pct >= threshold:
@@ -199,21 +219,22 @@ def _build_public_data_issues(
             else:
                 reason = f"매매가 대비 전세금 비율이 {risk_text}"
             # 원인은 계약서 제1조의 보증금 줄이므로 그 위치를 가리킨다
-            page, location = _article_location(pages or [], 1)
             issues.append({
                 "clause": f"전세가율 {jeonse_ratio_pct:.0f}%",
                 "reason": reason,
                 "severity": severity,
                 "is_legal_basis": True,
-                "location": f"{location} 보증금" if location else None,
+                "location": deposit_location,
                 "page": page,
             })
             break
 
     if not is_registered:
+        # 건축물대장 표제부에는 소유권 정보가 없다. '등재 여부'만 말하고 소유권 확인을 주장하지 않는다
         issues.append({
             "clause": "건물 미등기",
-            "reason": "등기부등본이 없어 소유권 확인이 불가능합니다. 대항력·우선변제권 보호를 받을 수 없으므로 계약을 중단하세요.",
+            "reason": "건축물대장에 등재되지 않은 건물입니다. 적법한 건물인지와 소유자를 확인할 수 없고, "
+                      "전입신고를 해도 대항력·우선변제권을 지키기 어려울 수 있으므로 계약을 중단하세요.",
             "severity": 5,
             "is_legal_basis": True,
         })
@@ -370,7 +391,7 @@ def _strip_code_fence(text: str) -> str:
     return t.strip()
 
 
-def _build_action_guide(level: str, bjd_code: Optional[str]) -> list[dict]:
+def _build_action_guide(level: str, bjd_code: Optional[str], gpt_issues: Optional[list[dict]] = None) -> list[dict]:
     guide: list[dict] = []
 
     if level == "danger":
@@ -396,9 +417,23 @@ def _build_action_guide(level: str, bjd_code: Optional[str]) -> list[dict]:
                 "address": inst.get("address", ""),
             })
 
-    guide.append({
-        "type": "legal",
-        "message": "전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004",
-    })
+    guide.append({"type": "legal", "message": _legal_message(gpt_issues or [])})
 
     return guide
+
+
+_REPORT_CONTACT = "전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004"
+
+
+def _legal_message(gpt_issues: list[dict]) -> str:
+    """강행규정 위반 조항이 있으면 위치·근거 조문과 함께 '동의해도 무효'임을 알리고, 신고처를 덧붙인다."""
+    void = [i for i in gpt_issues if i.get("is_legal_basis")]
+    if not void:
+        return _REPORT_CONTACT
+    parts = []
+    for i in void:
+        where = i.get("location") or "해당 조항"
+        basis = f"({i['legal_basis']} 위반)" if i.get("legal_basis") else "(강행규정 위반)"
+        parts.append(f"{where}{basis}")
+    return (f"{', '.join(parts)}은 임차인에게 불리한 강행규정 위반이라 동의해도 무효입니다. "
+            f"서명 전에 임대인에게 해당 특약의 삭제를 요구하세요. {_REPORT_CONTACT}")
