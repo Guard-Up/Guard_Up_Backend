@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 import httpx
 import xml.etree.ElementTree as ET
 
@@ -8,27 +9,50 @@ from app.core.config import settings
 from app.schemas.address import AddressResponse
 from app.schemas.building import BuildingResponse
 
-_RETRIES = 4  # 대기 0.5 → 1 → 2초, 최악 약 3.5초 더 걸림
+# 공공데이터포털은 빈 응답·503이 몇 초씩 몰려서 온다(EC2 실측: 약 10초 연속 실패 후 정상).
+# 횟수가 아니라 시간으로 버틴다. 앱의 요청 타임아웃(60초) 안에 끝나도록 잡는다.
+_BUILDING_DEADLINE = 15.0
+_TRADE_DEADLINE = 4.0  # 실거래가는 최대 12개월을 훑으므로 한 달당 짧게
 
 
-async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, parse):
+async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, parse, deadline: float):
     """
-    공공데이터포털은 가끔 HTTP 200에 빈 본문을 주거나 잠깐 503을 낸다.
-    본문이 비었거나 파싱에 실패하면 잠깐 쉬었다 다시 요청하고, 끝까지 실패하면 예외를 올린다.
+    본문이 비었거나 파싱·HTTP 오류가 나면 0.5 → 1 → 2초 간격으로 다시 요청하고,
+    deadline(초)이 지나도록 성공하지 못하면 마지막 예외를 올린다.
     """
-    last_error: Exception | None = None
-    for attempt in range(_RETRIES):
+    start = time.monotonic()
+    wait = 0.5
+    while True:
         try:
             response = await client.get(url, params=params)
             response.raise_for_status()
             if not response.text.strip():
                 raise ValueError("공공데이터 API 빈 응답")
             return parse(response)
-        except Exception as e:
-            last_error = e
-            if attempt < _RETRIES - 1:
-                await asyncio.sleep(0.5 * 2 ** attempt)
-    raise last_error
+        except Exception:
+            if time.monotonic() - start + wait > deadline:
+                raise
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, 2.0)
+
+
+# 한 번 성공한 조회는 잠시 기억해 둔다. 건축물대장·실거래가는 몇 시간 안에 바뀌지 않고,
+# 같은 건물을 다시 분석할 때(시연 포함) 공공데이터포털 장애를 아예 피할 수 있다.
+# 프로세스 메모리에만 두며 개인정보는 들어가지 않는다(건물 코드·건물명·가격만).
+_CACHE_TTL = 6 * 60 * 60
+_cache: dict[tuple, tuple[float, object]] = {}
+
+
+def _cache_get(key: tuple):
+    hit = _cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    _cache.pop(key, None)
+    return None
+
+
+def _cache_put(key: tuple, value) -> None:
+    _cache[key] = (time.monotonic() + _CACHE_TTL, value)
 
 
 def split_bjd_code(bjd_code: str) -> tuple[str | None, str | None]:
@@ -111,6 +135,11 @@ async def fetch_trade_price_by_name(
     if not target_name:
         return None
 
+    cache_key = ("trade", api_url, lawd_cd, target_name)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     deal_ymd_candidates = get_deal_ymd_candidates(12)
 
     try:
@@ -126,6 +155,7 @@ async def fetch_trade_price_by_name(
                             "DEAL_YMD": deal_ymd,
                         },
                         lambda r: ET.fromstring(r.text),
+                        deadline=_TRADE_DEADLINE,
                     )
                 except Exception:
                     # 한 달 조회가 끝내 실패해도 나머지 달은 계속 본다
@@ -158,6 +188,7 @@ async def fetch_trade_price_by_name(
                     ):
                         parsed_amount = parse_trade_amount(deal_amount)
                         if parsed_amount is not None:
+                            _cache_put(cache_key, parsed_amount)
                             return parsed_amount
 
         return None
@@ -294,8 +325,15 @@ async def get_building_info(
             "_type": "json",
         }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            data = await _get_with_retry(client, settings.BUILDING_API_URL, params, lambda r: r.json())
+        cache_key = ("building", sigungu_cd, bjdong_cd, bun, ji)
+        data = _cache_get(cache_key)
+        if data is None:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                data = await _get_with_retry(
+                    client, settings.BUILDING_API_URL, params, lambda r: r.json(),
+                    deadline=_BUILDING_DEADLINE,
+                )
+            _cache_put(cache_key, data)
 
         body = data.get("response", {}).get("body", {})
         total_count = int(body.get("totalCount", 0))
