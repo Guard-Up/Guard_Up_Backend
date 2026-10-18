@@ -155,9 +155,10 @@ session:{uuid} = {
 | HTTP | error_code | 설명 |
 | --- | --- | --- |
 | 400 | INVALID_SESSION | 유효하지 않은 session_id / 2단계 미완료 |
-| 502 | PUBLIC_API_ERROR | 건축물대장·국토부 API 호출 실패 |
+| 502 | PUBLIC_API_ERROR | 건축물대장 API가 4번 재시도 후에도 실패 (공공데이터포털 일시 장애) |
 
 > 🔄 **변경**: `BUILDING_NOT_FOUND`(404) **미사용**.
+> 🔄 **변경**: 예전에는 조회가 실패하면 `is_registered: false`(미등기)로 응답해 멀쩡한 건물이 0점으로 나갔다. 이제 실패는 502로 오고, `is_registered: false`는 건축물대장에 실제로 등재 기록이 없을 때만 온다. 실거래가 조회 실패는 오류가 아니라 `sale_price`·`jeonse_ratio`가 null로 온다.
 > 건물 미등기·정보 없음이어도 404로 막지 않고 4단계까지 진행하며, 4단계에서 **점수 0점·danger**로 처리됩니다.
 > (`is_registered: false`로 응답되니, Flutter는 이 값으로 미등기 경고를 표시하면 됩니다.)
 
@@ -208,7 +209,7 @@ session:{uuid} = {
 | **stop** | message | 즉시 날인 중단 안내 | level=danger |
 | **warning** | message | 🆕 서명 전 전문가 확인 권장 | level=caution |
 | **institution** | name, phone, region, address | 자립지원기관 (법정동 코드 매칭) | bjd_code로 기관 매칭 시 |
-| **legal** | message | 법률 상담 안내 (항상 포함) | 항상 |
+| **legal** | message | 🔄 강행규정 위반 조항이 있으면 그 위치·근거 조문과 "동의해도 무효이니 삭제를 요구하라"는 안내 + 피해 신고처. 없으면 신고처만 | 항상 |
 
 > 🆕 **추가**: `warning` 타입 — caution 등급에서 나옵니다. Flutter가 `stop`/`institution`/`legal`만 처리하면 이 항목이 누락되니 **`warning`도 핸들링 필요**.
 
@@ -218,9 +219,38 @@ session:{uuid} = {
 "action_guide": [
   { "type": "stop", "message": "계약서에 심각한 독소 조항이 발견되었습니다. 즉시 날인을 중단하고 전문가 상담을 받으세요." },
   { "type": "institution", "name": "서울 자립지원 전담기관", "phone": "02-000-0000", "region": "서울특별시", "address": "서울시 종로구 OO로 00" },
-  { "type": "legal", "message": "전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004" }
+  { "type": "legal", "message": "특약사항 1항(주택임대차보호법 제3조 위반)은 임차인에게 불리한 강행규정 위반이라 동의해도 무효입니다. 서명 전에 임대인에게 해당 특약의 삭제를 요구하세요. 전세사기 피해 신고: 경찰청 112 또는 LH콜센터 1600-1004" }
 ]
 ```
+
+### issues 예시 (대표 예시 계약서 실제 응답)
+
+전체 응답은 `tests/fixtures/sample_contract_demo_risk_response.json`. 앱 mock으로 그대로 쓸 수 있다.
+
+```json
+"issues": [
+  { "clause": "전세가율 103%", "reason": "보증금 21억원이 최근 실거래 매매가 20억 4,500만원의 102.7%입니다. 90% 이상이면 …",
+    "severity": 5, "is_legal_basis": true,
+    "location": "제1조(보증금과 차임 및 관리비) 보증금", "page": 1, "legal_basis": null },
+  { "clause": "임차인은 임대차기간 중 본 주택에 주민등록 전입신고를 하지 않기로 한다.", "reason": "…",
+    "severity": 5, "is_legal_basis": true,
+    "location": "특약사항 1항", "page": 2, "legal_basis": "주택임대차보호법 제3조" },
+  { "clause": "임대차 종료 시 원상복구 비용은 … 임차인이 전액 부담한다.", "reason": "…",
+    "severity": 3, "is_legal_basis": false,
+    "location": "특약사항 2항", "page": 2, "legal_basis": null }
+]
+```
+
+**issues에 들어오는 항목 종류**
+
+| 출처 | clause 예 | 점수 반영 | location / page |
+|---|---|---|---|
+| GPT 탐지 조항 | 계약서 원문 발췌 | O (severity별 감점) | 원문에서 찾은 조·특약 위치 |
+| 전세가율 70% 이상 | "전세가율 83%" | X (전세가율 감점은 따로) | 제1조 보증금 줄 |
+| 🆕 전세가율 확인 불가 | "전세가율 확인 불가" (severity 2, is_legal_basis false) | X | 제1조 보증금 줄 |
+| 건축물대장 미등재 | "건물 미등기" | X (미등기는 0점 고정) | null |
+
+"전세가율 확인 불가"는 실거래가를 못 찾았을 때 추정하지 않고 사용자에게 직접 확인을 안내하는 항목이다. is_legal_basis가 false라 '검토 권장' 영역에 표시하면 된다.
 
 **에러 응답**
 
