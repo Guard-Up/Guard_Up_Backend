@@ -1,3 +1,4 @@
+import asyncio
 import re
 import httpx
 import xml.etree.ElementTree as ET
@@ -6,6 +7,28 @@ from datetime import datetime
 from app.core.config import settings
 from app.schemas.address import AddressResponse
 from app.schemas.building import BuildingResponse
+
+_RETRIES = 4  # 대기 0.5 → 1 → 2초, 최악 약 3.5초 더 걸림
+
+
+async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, parse):
+    """
+    공공데이터포털은 가끔 HTTP 200에 빈 본문을 주거나 잠깐 503을 낸다.
+    본문이 비었거나 파싱에 실패하면 잠깐 쉬었다 다시 요청하고, 끝까지 실패하면 예외를 올린다.
+    """
+    last_error: Exception | None = None
+    for attempt in range(_RETRIES):
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            if not response.text.strip():
+                raise ValueError("공공데이터 API 빈 응답")
+            return parse(response)
+        except Exception as e:
+            last_error = e
+            if attempt < _RETRIES - 1:
+                await asyncio.sleep(0.5 * 2 ** attempt)
+    raise last_error
 
 
 def split_bjd_code(bjd_code: str) -> tuple[str | None, str | None]:
@@ -93,17 +116,20 @@ async def fetch_trade_price_by_name(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             for deal_ymd in deal_ymd_candidates:
-                response = await client.get(
-                    api_url,
-                    params={
-                        "serviceKey": settings.MOLIT_API_KEY,
-                        "LAWD_CD": lawd_cd,
-                        "DEAL_YMD": deal_ymd,
-                    },
-                )
-                response.raise_for_status()
-
-                root = ET.fromstring(response.text)
+                try:
+                    root = await _get_with_retry(
+                        client,
+                        api_url,
+                        {
+                            "serviceKey": settings.MOLIT_API_KEY,
+                            "LAWD_CD": lawd_cd,
+                            "DEAL_YMD": deal_ymd,
+                        },
+                        lambda r: ET.fromstring(r.text),
+                    )
+                except Exception:
+                    # 한 달 조회가 끝내 실패해도 나머지 달은 계속 본다
+                    continue
                 items = root.findall(".//item")
 
                 for item in items:
@@ -248,8 +274,8 @@ async def get_building_info(
         return BuildingResponse(
             building_name=None,
             build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
+            # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+            # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
             is_registered=False,
             sale_price=None,
             jeonse_ratio=None,
@@ -269,10 +295,7 @@ async def get_building_info(
         }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(settings.BUILDING_API_URL, params=params)
-
-        response.raise_for_status()
-        data = response.json()
+            data = await _get_with_retry(client, settings.BUILDING_API_URL, params, lambda r: r.json())
 
         body = data.get("response", {}).get("body", {})
         total_count = int(body.get("totalCount", 0))
@@ -281,8 +304,8 @@ async def get_building_info(
             return BuildingResponse(
                 building_name=None,
                 build_year=None,
-                owner_type=None,
-                mortgage_amount=None,
+                # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+                # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
                 is_registered=False,
                 sale_price=None,
                 jeonse_ratio=None,
@@ -299,6 +322,9 @@ async def get_building_info(
 
         building_name = item.get("bldNm")
 
+        use_apr_day = item.get("useAprDay")
+        build_year = int(use_apr_day[:4]) if use_apr_day and len(use_apr_day) >= 4 else None
+
         sale_price = await get_apartment_sale_price(building_name, bjd_code)
         if sale_price is None:
             sale_price = await get_rowhouse_sale_price(building_name, bjd_code)
@@ -307,21 +333,16 @@ async def get_building_info(
 
         return BuildingResponse(
             building_name=building_name,
-            build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
+            build_year=build_year,
+            # owner_type=None,      # TODO: 등기부등본 API 연동 시 복구
+            # mortgage_amount=None, # TODO: 등기부등본 API 연동 시 복구
             is_registered=True,
             sale_price=sale_price,
             jeonse_ratio=None,
         )
 
     except Exception:
-        return BuildingResponse(
-            building_name=None,
-            build_year=None,
-            owner_type=None,
-            mortgage_amount=None,
-            is_registered=False,
-            sale_price=None,
-            jeonse_ratio=None,
-        )
+        # 조회 실패를 '미등기'로 돌려주면 멀쩡한 건물이 0점·계약 중단으로 나간다.
+        # 실패는 실패로 올려 보내고, 라우터가 502 PUBLIC_API_ERROR로 바꾼다.
+        raise
+    

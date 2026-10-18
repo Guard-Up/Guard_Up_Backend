@@ -15,6 +15,7 @@ KEY_ROAD_ADDRESS = "road_address"
 KEY_BJD_CODE = "bjd_code"
 KEY_BUILDING = "building"
 KEY_STEPS_COMPLETED = "steps_completed"
+KEY_JIBUN_ADDRESS = "jibun_address"
 
 _redis_client: redis.Redis | None = None
 
